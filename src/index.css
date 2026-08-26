@@ -1,0 +1,108 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Outfit", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  /* High Density theme custom palette */
+  --color-atelier-50: #FAF7F5;   /* Ambient backing canvas */
+  --color-atelier-100: #F8EAE4;  /* active tab state highlight bg */
+  --color-atelier-200: #EEDDD2;  /* theme outline border lines */
+  --color-atelier-300: #FADCD3;  /* alerts / warnings critical outlines */
+  --color-atelier-400: #FFF0EB;  /* warnings / highlight notifications backings */
+  --color-atelier-500: #D48C7E;  /* warm dusty rose / primary brand terracotta */
+  --color-atelier-600: #c27b6d;  /* mid terracotta hover and buttons */
+  --color-atelier-700: #8B4513;  /* redwood / saddle-brown warning active label */
+  --color-atelier-800: #713e2b;  /* deep chocolate subheaders */
+  --color-atelier-900: #5C4033;  /* rich dark coffee / chocolate headers */
+  --color-atelier-950: #3d281e;  /* extremely dark luxury contrast brown */
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: #FAF7F5;
+  color: #3d281e;
+  overflow-x: hidden;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-display);
+}
+
+/* Custom Scrollbar for refined layout */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #faf6f0;
+}
+::-webkit-scrollbar-thumb {
+  background: #e1c2a8;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #be7f5e;
+}
+
+/* Regras de impressão de alta fidelidade para salvar em PDF e imprimir */
+@media print {
+  /* Ocultar elementos desnecessários na folha impressa (Sidebar, Headers Globais, Footers e botões) */
+  sidebar,
+  aside,
+  header,
+  footer,
+  button,
+  .no-print,
+  .no-print-area {
+    display: none !important;
+  }
+
+  /* Ajustar o container principal para preencher 100% da largura da página (sem margem para Sidebar) */
+  main,
+  #root,
+  .lg\:pl-64 {
+    padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 100% !important;
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+  }
+
+  /* Forçar o corpo da página a usar um fundo branco limpo e cor de texto bem contrastada */
+  body, html {
+    background-color: #ffffff !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+    width: 100% !important;
+    height: auto !important;
+    font-size: 11pt !important;
+  }
+
+  /* Forçar a renderização perfeita de cores de preenchimento (gráficos, status badges, divisórias) */
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    color-adjust: exact !important;
+  }
+
+  /* Configurar tamanho de página A4, margem limpa e remover textos automáticos indesejados (URL, Data) */
+  @page {
+    size: A4 portrait;
+    margin: 15mm 12mm 15mm 12mm;
+  }
+
+  /* Quebras de página amigáveis para evitar cortar cards ou tabelas ao meio */
+  .bg-white,
+  tr,
+  .rounded-3xl {
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+}
+

@@ -1,0 +1,6 @@
+{
+  "name": "FlowTailor",
+  "description": "SaaS para gestão profissional de ateliês de costura em Angola, com controle de medidas corporativas desactualizadas, alertas de prazos integrados por WhatsApp e histórico de faturamento.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

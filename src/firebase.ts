@@ -22,18 +22,16 @@ import {
   Firestore
 } from 'firebase/firestore';
 export { doc, setDoc, getDoc, getDocs, deleteDoc, collection, query, where, writeBatch };
-import firebaseConfigJson from '../firebase-applet-config.json';
 
 // 1. Firebase Client Configuration reading strictly with priority from applet config and fallback to import.meta.env
-const cfg = (firebaseConfigJson as any) || {};
 const firebaseConfig = {
-  apiKey: cfg.apiKey || import.meta.env.VITE_FIREBASE_API_KEY || '',
-  authDomain: cfg.authDomain || import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || '',
-  projectId: cfg.projectId || import.meta.env.VITE_FIREBASE_PROJECT_ID || '',
-  storageBucket: cfg.storageBucket || import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || '',
-  messagingSenderId: cfg.messagingSenderId || import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '',
-  appId: cfg.appId || import.meta.env.VITE_FIREBASE_APP_ID || '',
-  databaseURL: cfg.databaseURL || import.meta.env.VITE_FIREBASE_DATABASE_URL || '',
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || '',
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || '',
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || '',
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || '',
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '',
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || '',
+  databaseURL: import.meta.env.VITE_FIREBASE_DATABASE_URL || '',
 };
 
 // Utility to clean objects for Firestore (removes undefined values that Firestore rejects)

@@ -20,7 +20,7 @@ router.post(
   validateBody(createAtelieSchema),
   (req: Request, res: Response) => {
     const atelieData = req.body as CreateAtelieInput;
-    const atelieId = `atelie_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const atelieId = `atelie_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`;
 
     const newAtelie = {
       id: atelieId,

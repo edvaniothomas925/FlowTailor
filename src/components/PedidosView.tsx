@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { localDb } from '../firebase';
+import { localDb } from '../lib/neonStore';
 import { Atelie, Cliente, Pedido, TipoPeca, PedidoStatus } from '../types';
 import { Search, PlusCircle, Filter, Calendar, DollarSign, Image as ImageIcon, CheckCircle, Clock, Eye, AlertCircle, Trash2, Lock, Link, Save, HelpCircle, Maximize2, ExternalLink } from 'lucide-react';
 import { toast } from '../lib/toast';
@@ -73,7 +73,7 @@ export default function PedidosView({ atelie, preselectedClientId, onClearPresel
     if (!clienteObj) return;
 
     const novoPedido: Pedido = {
-      id: 'ped_' + Math.random().toString(36).substr(2, 9),
+      id: 'ped_' + (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID().replace(/-/g, '').slice(0, 12) : Date.now().toString(36)),
       clienteId,
       clienteNome: clienteObj.nome,
       clienteTelefone: clienteObj.telefone,

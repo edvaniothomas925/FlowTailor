@@ -1,4 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
+import { env } from '../config/env.js';
+import { logSecurityEvent } from '../services/auditLogger.js';
+
+const CLOUD_RUN_STRICT_REGEX = /^https:\/\/[a-z0-9-]+\.run\.app$/;
+const LOCALHOST_STRICT_REGEX = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
 
 /**
  * Sanitizes input string to neutralize Cross-Site Scripting (XSS),
@@ -72,7 +77,7 @@ export function securityHeaders(req: Request, res: Response, next: NextFunction)
 /**
  * Middleware that automatically sanitizes incoming req.body, req.query, and req.params
  */
-export function sanitizeInputs(req: Request, res: Response, next: NextFunction) {
+export function sanitizeInputs(req: Request, _res: Response, next: NextFunction) {
   if (req.body) {
     req.body = sanitizeObject(req.body);
   }
@@ -83,4 +88,58 @@ export function sanitizeInputs(req: Request, res: Response, next: NextFunction) 
     req.params = sanitizeObject(req.params);
   }
   next();
+}
+
+/**
+ * CSRF & Origin Validation for state-changing requests
+ */
+export function csrfProtection(req: Request, res: Response, next: NextFunction) {
+  const stateChangingMethods = ['POST', 'PUT', 'PATCH', 'DELETE'];
+  if (!stateChangingMethods.includes(req.method)) {
+    return next();
+  }
+
+  const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
+
+  // If no origin header is present on internal/server-to-server calls, allow
+  if (!origin) {
+    return next();
+  }
+
+  const allowedSet = new Set<string>();
+  if (env.APP_URL) allowedSet.add(env.APP_URL.trim());
+  if (env.VITE_APP_URL) allowedSet.add(env.VITE_APP_URL.trim());
+  if (process.env.VITE_APP_URL) allowedSet.add(process.env.VITE_APP_URL.trim());
+  if (env.CORS_ORIGIN) {
+    env.CORS_ORIGIN.split(',')
+      .map(o => o.trim())
+      .filter(Boolean)
+      .forEach(o => allowedSet.add(o));
+  }
+
+  const isDev = env.NODE_ENV === 'development';
+
+  if (
+    allowedSet.has(origin) ||
+    CLOUD_RUN_STRICT_REGEX.test(origin) ||
+    (isDev && LOCALHOST_STRICT_REGEX.test(origin))
+  ) {
+    return next();
+  }
+
+  const forwarded = req.headers['x-forwarded-for'];
+  const ip = (typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : req.socket.remoteAddress) || '127.0.0.1';
+
+  logSecurityEvent({
+    type: 'CSRF_BLOCKED',
+    severity: 'WARN',
+    ip,
+    path: req.originalUrl,
+    method: req.method,
+    details: `CSRF validation blocked request from untrusted origin: ${origin}`,
+  });
+
+  return res.status(403).json({
+    error: 'Acesso rejeitado pela validação de integridade CSRF do FlowTailor.',
+  });
 }

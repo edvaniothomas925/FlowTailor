@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { localDb } from '../firebase';
+import { localDb } from '../lib/neonStore';
 import { Atelie, Pedido, Cliente } from '../types';
 import { 
   TrendingUp, 

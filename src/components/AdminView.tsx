@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { localDb } from '../firebase';
+import { localDb } from '../lib/neonStore';
 import { Atelie, SolicitacaoPagamento, ConfiguracaoPagamento } from '../types';
 import { 
   Shield, Sparkles, AlertCircle, CheckCircle2, XCircle, Users, Smartphone, 
   BookOpen, Key, Trash, CreditCard, Save, BarChart3, Plus, X, BarChart, 
-  Calendar, Award, ArrowUpRight, TrendingUp, HelpCircle
+  Calendar, Award, ArrowUpRight, TrendingUp, HelpCircle, RefreshCw, Cloud
 } from 'lucide-react';
 import { toast, confirmDialog } from '../lib/toast';
 
@@ -40,6 +40,13 @@ export default function AdminView({ onRefreshAtelieSession }: AdminViewProps) {
   
   // Add Admin form
   const [novoAdminEmail, setNovoAdminEmail] = useState('');
+  const [novoAdminSenha, setNovoAdminSenha] = useState('');
+  const [adminCreds, setAdminCreds] = useState<Record<string, { passwordHash: string; passwordSetAt?: string }>>({});
+
+  // Sync state
+  const [isSyncingAdmin, setIsSyncingAdmin] = useState(false);
+  const [syncProgress, setSyncProgress] = useState(0);
+  const [syncStageMsg, setSyncStageMsg] = useState('');
 
   // Floating Toast State
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
@@ -77,6 +84,7 @@ export default function AdminView({ onRefreshAtelieSession }: AdminViewProps) {
     setSolicitacoes(localDb.getSolicitacoes().sort((a,b) => b.solicitadoEm.localeCompare(a.solicitadoEm)));
     setConfigs(localDb.getConfigs());
     setAdminsList(localDb.getAdmins());
+    setAdminCreds(localDb.getAdminCredentials());
   };
 
   // KPI Calculations
@@ -223,13 +231,25 @@ export default function AdminView({ onRefreshAtelieSession }: AdminViewProps) {
     loadAdminData();
   };
 
-  const handleAdicionarAdmin = (e: React.FormEvent) => {
+  const handleAdicionarAdmin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!novoAdminEmail) return;
-    localDb.addAdmin(novoAdminEmail);
-    setNovoAdminEmail('');
-    loadAdminData();
-    showToast('Novo administrador associado com sucesso!', 'success');
+    const emailClean = novoAdminEmail.toLowerCase().trim();
+
+    try {
+      await localDb.addAdmin(emailClean, novoAdminSenha ? novoAdminSenha.trim() : undefined);
+      setNovoAdminEmail('');
+      setNovoAdminSenha('');
+      loadAdminData();
+      showToast(
+        novoAdminSenha
+          ? 'Novo administrador adicionado com palavra-passe inicial configurada!'
+          : 'Novo administrador adicionado! Ele definirá a palavra-passe no seu 1º acesso.',
+        'success'
+      );
+    } catch (err: any) {
+      showToast(err.message || 'Erro ao adicionar administrador.', 'error');
+    }
   };
 
   const handleRemoverAdmin = (email: string) => {
@@ -258,7 +278,7 @@ export default function AdminView({ onRefreshAtelieSession }: AdminViewProps) {
       return;
     }
 
-    const uid = 'atelie_man_' + Math.random().toString(36).substr(2, 9);
+    const uid = 'atelie_man_' + (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID().replace(/-/g, '').slice(0, 12) : Date.now().toString(36));
     const validadeDiasNum = Number(novoAtelieValidade);
     const expiracao = new Date(Date.now() + validadeDiasNum * 24 * 60 * 60 * 1000).toISOString();
 
@@ -287,6 +307,38 @@ export default function AdminView({ onRefreshAtelieSession }: AdminViewProps) {
     setMostrarCriarForm(false);
   };
 
+  // Manual Cloud Sync for Admin
+  const handleForcarSincronizacaoAdmin = async () => {
+    if (isSyncingAdmin) return;
+    setIsSyncingAdmin(true);
+    setSyncProgress(15);
+    setSyncStageMsg('A preparar dados administrativos para sincronização com o Neon PostgreSQL...');
+
+    try {
+      const result = await localDb.forceSyncAdminToCloud((progress, msg) => {
+        setSyncProgress(progress);
+        setSyncStageMsg(msg);
+      });
+
+      if (result.success) {
+        showToast(`Sucesso! ${result.syncedItemsCount} registos administrativos sincronizados com o Neon PostgreSQL.`, 'success');
+        alert(`✅ [Sincronização Administrativa Neon Concluída]\n\nOs registos relacionais foram persistidos com sucesso no Neon PostgreSQL:\n• Ateliês da Plataforma: ${atelies.length} registos na tabela 'atelies'\n• Solicitações / Comprovativos: ${solicitacoes.length} registos na tabela 'solicitacoes_pagamento'\n• Parâmetros Bancários: gravados na tabela 'configuracoes'\n• Administradores: ${adminsList.length} autorizados na tabela 'admins'`);
+      } else {
+        showToast(`Erro na sincronização: ${result.error}`, 'error');
+        alert(`❌ [Falha ao Gravar no Neon PostgreSQL]\n\nOcorreu um erro ao persistir dados administrativos:\n${result.error}`);
+      }
+    } catch (err: any) {
+      console.error(err);
+      showToast('Falha na sincronização administrativa com Neon.', 'error');
+      alert(`❌ Erro: ${err?.message || err}`);
+    } finally {
+      setIsSyncingAdmin(false);
+      setSyncProgress(0);
+      setSyncStageMsg('');
+      loadAdminData();
+    }
+  };
+
   // Sorting columns filters for clients table list
   const filteredAtelies = atelies.filter(ate => {
     const matchesBusca = ate.nome.toLowerCase().includes(userBusca.toLowerCase()) || ate.emailOwner.toLowerCase().includes(userBusca.toLowerCase());
@@ -301,16 +353,28 @@ export default function AdminView({ onRefreshAtelieSession }: AdminViewProps) {
     <div className="space-y-6">
       
       {/* Header operations area */}
-      <div className="flex items-center justify-between border-b pb-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b pb-4">
         <div>
           <h2 className="text-2xl font-bold font-display tracking-tight text-gray-950 flex items-center gap-2">
             <Shield className="w-6 h-6 text-atelier-700 animate-bounce" /> Painel de Gestão Admin
           </h2>
           <p className="text-xs text-cool-slate-400">Administração global, faturamento manual, verificador de comprovativos e controlo de licenças.</p>
         </div>
-        <span className="px-3 py-1 bg-atelier-950 text-white font-mono text-xs rounded-xl flex items-center gap-1">
-          <Sparkles className="w-3.5 h-3.5 text-atelier-400" /> Admin Ativo
-        </span>
+        <div className="flex items-center gap-2.5">
+          <button
+            type="button"
+            onClick={handleForcarSincronizacaoAdmin}
+            disabled={isSyncingAdmin}
+            className="px-3.5 py-2 bg-atelier-900 hover:bg-atelier-850 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-2 shadow-xs cursor-pointer disabled:opacity-50"
+            title="Sincronizar todos os ateliês, comprovativos e configurações com o Neon PostgreSQL"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isSyncingAdmin ? 'animate-spin text-atelier-400' : 'text-atelier-400'}`} />
+            {isSyncingAdmin ? `A sincronizar (${syncProgress}%)...` : 'Sincronizar Nuvem (Neon DB)'}
+          </button>
+          <span className="px-3 py-2 bg-emerald-950 text-emerald-300 font-mono text-xs rounded-xl flex items-center gap-1.5 border border-emerald-800">
+            <Sparkles className="w-3.5 h-3.5 text-emerald-400" /> Admin Ativo
+          </span>
+        </div>
       </div>
 
       {/* KPI Stats overview */}
@@ -836,46 +900,105 @@ export default function AdminView({ onRefreshAtelieSession }: AdminViewProps) {
             
             {/* Administrators Listing */}
             <div className="bg-white p-5 border rounded-3xl shadow-sm space-y-4">
-              <h3 className="text-sm font-bold text-slate-900 border-b pb-1.5">🔑 Administradores Activos</h3>
+              <div className="flex items-center justify-between border-b pb-2">
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+                  <Shield className="w-4 h-4 text-amber-600" /> Administradores Registados ({adminsList.length})
+                </h3>
+                <span className="text-[11px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-medium">
+                  Segurança Ativa
+                </span>
+              </div>
               
-              <div className="divide-y space-y-3.5">
-                {adminsList.map(adminEmail => (
-                  <div key={adminEmail} className="pt-3 first:pt-0 flex items-center justify-between text-xs">
-                    <span className="font-semibold text-slate-900 font-mono">{adminEmail}</span>
-                    <button
-                      onClick={() => handleRemoverAdmin(adminEmail)}
-                      className="text-red-600 hover:text-red-900 font-semibold"
-                    >
-                      Remover Acesso
-                    </button>
-                  </div>
-                ))}
+              <div className="divide-y divide-slate-100 space-y-3.5">
+                {adminsList.map(adminEmail => {
+                  const hasPass = Boolean(adminCreds[adminEmail.toLowerCase()]?.passwordHash);
+                  const passSetAt = adminCreds[adminEmail.toLowerCase()]?.passwordSetAt;
+
+                  return (
+                    <div key={adminEmail} className="pt-3.5 first:pt-0 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-slate-900 font-mono">{adminEmail}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {hasPass ? (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md">
+                              <CheckCircle2 className="w-3 h-3" /> Palavra-passe configurada
+                              {passSetAt && (
+                                <span className="text-[9px] text-emerald-600 font-normal">
+                                  ({new Date(passSetAt).toLocaleDateString('pt-AO')})
+                                </span>
+                              )}
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-md">
+                              <Key className="w-3 h-3" /> 1º Acesso Pendente (Definirá ao entrar)
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          onClick={() => handleRemoverAdmin(adminEmail)}
+                          className="text-red-600 hover:text-red-800 hover:bg-red-50 px-2.5 py-1 rounded-lg font-semibold transition-all"
+                        >
+                          Remover Acesso
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
 
             {/* Promote Admin Form */}
             <form onSubmit={handleAdicionarAdmin} className="bg-white p-5 border rounded-3xl shadow-sm space-y-4 h-fit">
-              <h3 className="text-sm font-bold text-slate-900 border-b pb-1.5">🚀 Promover Novo Administrador</h3>
+              <div className="border-b pb-2">
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+                  <Plus className="w-4 h-4 text-slate-700" /> Promover Novo Administrador
+                </h3>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Adicione e-mails autorizados a gerir os ateliês e comprovativos na plataforma.
+                </p>
+              </div>
               
-              <div>
-                <label className="block text-xs font-bold text-slate-600 mb-1.5">E-mail do utilizador</label>
+              <div className="space-y-1">
+                <label className="block text-xs font-bold text-slate-700">E-mail do Administrador *</label>
                 <input
                   type="email"
                   required
-                  placeholder="Ex: costura.admin@ateliepro.com"
-                  className="w-full p-2 border rounded-xl text-xs bg-slate-50 focus:outline-none font-mono"
+                  placeholder="Ex: novo.admin@flowtailor.ao"
+                  className="w-full p-2.5 border rounded-xl text-xs bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-slate-900/10 font-mono"
                   value={novoAdminEmail}
                   onChange={(e) => setNovoAdminEmail(e.target.value)}
                 />
-                <span className="text-[10px] text-slate-400 mt-1 block">O e-mail indicado precisa de pertencer a uma conta existente para receber acessos do painel.</span>
               </div>
 
-              <div>
+              <div className="space-y-1">
+                <label className="block text-xs font-bold text-slate-700 flex items-center justify-between">
+                  <span>Palavra-passe Inicial (Opcional)</span>
+                  <span className="text-[10px] text-slate-400 font-normal">Min. 6 caracteres</span>
+                </label>
+                <input
+                  type="password"
+                  minLength={6}
+                  placeholder="Deixar em branco para definir no 1º acesso"
+                  className="w-full p-2.5 border rounded-xl text-xs bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-slate-900/10"
+                  value={novoAdminSenha}
+                  onChange={(e) => setNovoAdminSenha(e.target.value)}
+                />
+                <p className="text-[10px] text-slate-500 leading-normal pt-1">
+                  💡 <strong>Regra do 1º Acesso:</strong> Se não definir agora uma palavra-passe, o administrador será obrigado a cadastrá-la no seu primeiro dia de acesso antes de poder visualizar o painel.
+                </p>
+              </div>
+
+              <div className="pt-2">
                 <button
                   type="submit"
-                  className="w-full py-2 bg-slate-900 hover:bg-black text-white rounded-xl text-xs font-bold"
+                  className="w-full py-2.5 bg-slate-900 hover:bg-black text-white rounded-xl text-xs font-bold transition-all shadow-md"
                 >
-                  Confirmar Promoção
+                  Adicionar Administrador
                 </button>
               </div>
             </form>

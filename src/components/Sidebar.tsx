@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom';
-import { customAuth, localDb } from '../firebase';
+import { customAuth, localDb } from '../lib/neonStore';
 import { LayoutDashboard, Users, Scissors, Settings, ShieldAlert, LogOut, Sparkles, X, Download, TrendingUp, Cloud, CloudOff, RefreshCw } from 'lucide-react';
 import { useState, useEffect } from 'react';
 
@@ -254,7 +254,7 @@ export default function Sidebar({ onLogout, isAdmin, atelieName, isOpenMobile, o
             {!isOnline 
               ? 'Guardado em cache local no aparelho. Será enviado assim que tiver internet.'
               : isSyncing 
-                ? 'A gravar alterações no Cloud Firestore...'
+                ? 'A gravar alterações no Neon PostgreSQL...'
                 : 'Sincronização automática ativa sempre que houver internet.'}
           </p>
           {lastSync && (

@@ -9,6 +9,7 @@ export interface SecurityLogEvent {
     | 'INVALID_INPUT'
     | 'XSS_ATTEMPT_BLOCKED'
     | 'SUSPICIOUS_PAYLOAD'
+    | 'CSRF_BLOCKED'
     | 'SESSION_EXPIRED'
     | 'DATA_VALIDATED'
     | 'DATA_CREATED';
@@ -33,7 +34,7 @@ export function logSecurityEvent(event: Omit<SecurityLogEvent, 'id' | 'timestamp
   }
 
   const logEntry: SecurityLogEvent = {
-    id: `sec-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
+    id: `sec-${Date.now()}-${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`,
     timestamp: new Date().toISOString(),
     ...event,
   };

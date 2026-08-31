@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { localDb } from '../firebase';
+import { localDb } from '../lib/neonStore';
 import { Atelie, Cliente, Medidas, Pedido } from '../types';
 import { Users, Search, PlusCircle, AlertTriangle, ChevronRight, User, Ruler, FileText, ChevronDown, ChevronUp, ArrowLeft, Calendar, BadgeAlert } from 'lucide-react';
 import { toast } from '../lib/toast';
@@ -87,7 +87,7 @@ export default function ClientesView({ atelie, onNavigateToCreateOrder }: Client
     const cleanPhone = formattedTelefone.startsWith(cleanDDI) ? formattedTelefone : cleanDDI + formattedTelefone;
 
     const novoCliente: Cliente = {
-      id: 'cli_' + Math.random().toString(36).substr(2, 9),
+      id: 'cli_' + (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID().replace(/-/g, '').slice(0, 12) : Date.now().toString(36)),
       nome: novoNome,
       telefone: cleanPhone,
       email: novoEmail || undefined,
@@ -111,7 +111,7 @@ export default function ClientesView({ atelie, onNavigateToCreateOrder }: Client
     if (!clienteSelecionado) return;
 
     const novaMedidaRecord: Medidas = {
-      id: 'med_' + Math.random().toString(36).substr(2, 9),
+      id: 'med_' + (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID().replace(/-/g, '').slice(0, 12) : Date.now().toString(36)),
       clienteId: clienteSelecionado.id,
       busto: medidaBusto ? Number(medidaBusto) : undefined,
       cintura: medidaCintura ? Number(medidaCintura) : undefined,

@@ -159,7 +159,7 @@ export default function LandingPage({ onStartTrial, onLogin }: LandingPageProps)
     },
     {
       question: "As medidas e dados das minhas clientes estão seguros?",
-      answer: "Totalmente. O FlowTailor encripta todos os backups automáticos das fichas de medidas e faturamento no Firestore (nuvem Google). Cada ateliê possui isolamento completo de banco de dados, garantindo privacidade máxima."
+      answer: "Totalmente. O FlowTailor encripta todos os backups automáticos das fichas de medidas e faturamento no Neon PostgreSQL (nuvem encriptada). Cada ateliê possui isolamento completo e seguro de banco de dados, garantindo privacidade máxima."
     },
     {
       question: "O FlowTailor funciona como um aplicativo no meu telemóvel?",

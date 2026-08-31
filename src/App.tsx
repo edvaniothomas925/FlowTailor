@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import { customAuth, localDb, db, auth, doc, setDoc, writeBatch, sanitizeForFirestore } from './firebase';
+import { customAuth, localDb, sanitizeForPayload } from './lib/neonStore';
 import { UserSession, Atelie } from './types';
 
 // Importing custom components
@@ -42,6 +42,8 @@ import {
   Phone, 
   CreditCard, 
   ShieldCheck, 
+  Key,
+  CheckCircle2,
   Cloud, 
   Database, 
   RefreshCw, 
@@ -142,7 +144,7 @@ export default function App() {
     const handleToast = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (detail) {
-        const id = Math.random().toString(36).substring(2, 9);
+        const id = (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36));
         setToasts((prev) => [...prev, { id, message: detail.message, type: detail.type }]);
         setTimeout(() => {
           setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -229,7 +231,7 @@ export default function App() {
     }
 
     const handleGlobalOnline = () => {
-      toast.success('🌐 Ligação à Internet restabelecida! Dados sincronizados automaticamente com o Cloud Firestore.');
+      toast.success('🌐 Ligação à Internet restabelecida! Dados sincronizados com o Neon PostgreSQL.');
       localDb.syncIfOnline(atelie.id, false);
     };
 
@@ -750,6 +752,12 @@ function AuthScreen({ onLoginSuccess, initialTab = 'login', onBackToLanding, ini
   const [senha, setSenha] = useState('');
   const [errorMess, setErrorMess] = useState('');
 
+  // Admin First Access Password Setup State
+  const [adminFirstSetup, setAdminFirstSetup] = useState<{ email: string } | null>(null);
+  const [adminFirstSenha, setAdminFirstSenha] = useState('');
+  const [adminFirstSenhaConfirm, setAdminFirstSenhaConfirm] = useState('');
+  const [isSettingAdminPassword, setIsSettingAdminPassword] = useState(false);
+
   // Register Fields
   const [regAtelieNome, setRegAtelieNome] = useState('');
   const [regNomeDono, setRegNomeDono] = useState('');
@@ -793,11 +801,65 @@ function AuthScreen({ onLoginSuccess, initialTab = 'login', onBackToLanding, ini
     e.preventDefault();
     setErrorMess('');
 
+    const mailLower = email.toLowerCase().trim();
+    const isAdmin = localDb.getAdmins().includes(mailLower);
+
+    // Se for administrador e ainda não tem senha configurada (1º dia de acesso)
+    if (isAdmin && !localDb.hasAdminPassword(mailLower)) {
+      if (senha && senha.length >= 6) {
+        try {
+          await customAuth.login(mailLower, senha);
+          toast.success('🛡️ Palavra-passe de Administrador definida com sucesso no seu 1º acesso!');
+          onLoginSuccess();
+          return;
+        } catch (err: any) {
+          setErrorMess(err.message || 'Falha ao autenticar administrador.');
+          return;
+        }
+      } else {
+        // Abre o fluxo dedicado de configuração de palavra-passe no primeiro dia
+        setAdminFirstSetup({ email: mailLower });
+        return;
+      }
+    }
+
     try {
-      await customAuth.login(email);
+      await customAuth.login(email, senha);
       onLoginSuccess();
     } catch (err: any) {
-      setErrorMess(err.message || 'Erro inesperado.');
+      if (err?.isFirstAdminAccess) {
+        setAdminFirstSetup({ email: err.adminEmail || mailLower });
+      } else {
+        setErrorMess(err.message || 'Erro inesperado.');
+      }
+    }
+  };
+
+  const handleAdminFirstPasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMess('');
+
+    if (!adminFirstSetup?.email) return;
+
+    if (!adminFirstSenha || adminFirstSenha.length < 6) {
+      setErrorMess('A palavra-passe deve ter pelo menos 6 caracteres.');
+      return;
+    }
+
+    if (adminFirstSenha !== adminFirstSenhaConfirm) {
+      setErrorMess('As palavras-passe não coincidem. Por favor, confirme novamente.');
+      return;
+    }
+
+    setIsSettingAdminPassword(true);
+    try {
+      await customAuth.setupAdminFirstPassword(adminFirstSetup.email, adminFirstSenha);
+      toast.success('🛡️ Palavra-passe de Administrador criada com sucesso! Acesso concedido.');
+      onLoginSuccess();
+    } catch (err: any) {
+      setErrorMess(err.message || 'Erro ao gravar palavra-passe de Administrador.');
+    } finally {
+      setIsSettingAdminPassword(false);
     }
   };
 
@@ -811,7 +873,7 @@ function AuthScreen({ onLoginSuccess, initialTab = 'login', onBackToLanding, ini
     }
 
     try {
-      await customAuth.signUp(regEmail, regAtelieNome, regTelefone);
+      await customAuth.signUp(regEmail, regAtelieNome, regTelefone, regSenha);
       
       // Update the newly created ateliê to matching selected plan and country (since signUp default-seeds basico/AO)
       const current = customAuth.getCurrentUser();
@@ -856,45 +918,132 @@ function AuthScreen({ onLoginSuccess, initialTab = 'login', onBackToLanding, ini
 
       <div className="w-full max-w-md bg-white rounded-3xl border border-atelier-200/80 shadow-2xl shadow-atelier-950/5 overflow-hidden transition-all">
         
-        {/* Session tabs select */}
-        <div className="grid grid-cols-2 bg-atelier-50/50 border-b border-atelier-100 select-none">
-          <button
-            onClick={() => {
-              setActiveTab('login');
-              setErrorMess('');
-            }}
-            className={`py-3.5 text-xs font-bold text-center transition-all ${
-              activeTab === 'login'
-                ? 'bg-white border-b-2 border-atelier-600 text-atelier-950 font-extrabold'
-                : 'text-slate-500 hover:text-slate-900'
-            }`}
-          >
-            Entrar no Painel
-          </button>
-          
-          <button
-            onClick={() => {
-              setActiveTab('register');
-              setErrorMess('');
-            }}
-            className={`py-3.5 text-xs font-bold text-center transition-all ${
-              activeTab === 'register'
-                ? 'bg-white border-b-2 border-atelier-600 text-atelier-950 font-extrabold'
-                : 'text-slate-500 hover:text-slate-900'
-            }`}
-          >
-            Cadastrar Ateliê
-          </button>
-        </div>
-
-        <div className="p-6 sm:p-8 space-y-6">
-          
-          {errorMess && (
-            <div className="p-3 bg-red-50 border border-red-200 text-xs font-semibold text-red-700 rounded-xl leading-normal flex items-start gap-2">
-              <AlertTriangle className="w-4.5 h-4.5 text-red-600 shrink-0" />
-              <span>{errorMess}</span>
+        {/* If Admin First Setup is Active */}
+        {adminFirstSetup ? (
+          <div className="p-6 sm:p-8 space-y-5">
+            <div className="text-center space-y-1.5 pb-2 border-b border-atelier-100">
+              <div className="inline-flex p-3 bg-amber-500/10 text-amber-600 rounded-2xl mb-1">
+                <ShieldCheck className="w-7 h-7" />
+              </div>
+              <h2 className="text-xl font-bold font-display text-slate-900">
+                Primeiro Acesso de Administrador
+              </h2>
+              <p className="text-xs text-slate-500 max-w-xs mx-auto">
+                Conta: <span className="font-semibold text-slate-800">{adminFirstSetup.email}</span>
+              </p>
             </div>
-          )}
+
+            <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-2xl flex items-start gap-2.5">
+              <Key className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <p className="text-xs text-amber-900 leading-relaxed font-medium">
+                Por motivos de segurança, no seu primeiro dia de acesso como Administrador é obrigatório definir uma palavra-passe mestre para a sua conta.
+              </p>
+            </div>
+
+            {errorMess && (
+              <div className="p-3 bg-red-50 border border-red-200 text-xs font-semibold text-red-700 rounded-xl leading-normal flex items-start gap-2">
+                <AlertTriangle className="w-4.5 h-4.5 text-red-600 shrink-0" />
+                <span>{errorMess}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleAdminFirstPasswordSubmit} className="space-y-4">
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-slate-700 flex items-center gap-1">
+                  <Lock className="w-3.5 h-3.5 text-slate-500" /> Nova Palavra-passe de Administrador
+                </label>
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  placeholder="Mínimo 6 caracteres"
+                  className="w-full px-3.5 py-2.5 text-sm border border-slate-200 rounded-xl bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
+                  value={adminFirstSenha}
+                  onChange={(e) => setAdminFirstSenha(e.target.value)}
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-slate-700 flex items-center gap-1">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-slate-500" /> Confirmar Palavra-passe
+                </label>
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  placeholder="Digite a mesma palavra-passe"
+                  className="w-full px-3.5 py-2.5 text-sm border border-slate-200 rounded-xl bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
+                  value={adminFirstSenhaConfirm}
+                  onChange={(e) => setAdminFirstSenhaConfirm(e.target.value)}
+                />
+              </div>
+
+              <div className="pt-2 space-y-2">
+                <button
+                  type="submit"
+                  disabled={isSettingAdminPassword}
+                  className="w-full py-3 bg-amber-600 hover:bg-amber-700 text-white font-bold text-sm rounded-xl transition-all shadow-md shadow-amber-600/20 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  <ShieldCheck className="w-4 h-4" />
+                  {isSettingAdminPassword ? 'A gravar segurança...' : 'Gravar Senha e Entrar no Painel'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAdminFirstSetup(null);
+                    setAdminFirstSenha('');
+                    setAdminFirstSenhaConfirm('');
+                    setErrorMess('');
+                  }}
+                  className="w-full py-2.5 text-xs font-bold text-slate-500 hover:text-slate-800 transition-all text-center cursor-pointer"
+                >
+                  Cancelar e Voltar
+                </button>
+              </div>
+            </form>
+          </div>
+        ) : (
+          <>
+            {/* Session tabs select */}
+            <div className="grid grid-cols-2 bg-atelier-50/50 border-b border-atelier-100 select-none">
+              <button
+                onClick={() => {
+                  setActiveTab('login');
+                  setErrorMess('');
+                }}
+                className={`py-3.5 text-xs font-bold text-center transition-all ${
+                  activeTab === 'login'
+                    ? 'bg-white border-b-2 border-atelier-600 text-atelier-950 font-extrabold'
+                    : 'text-slate-500 hover:text-slate-900'
+                }`}
+              >
+                Entrar no Painel
+              </button>
+              
+              <button
+                onClick={() => {
+                  setActiveTab('register');
+                  setErrorMess('');
+                }}
+                className={`py-3.5 text-xs font-bold text-center transition-all ${
+                  activeTab === 'register'
+                    ? 'bg-white border-b-2 border-atelier-600 text-atelier-950 font-extrabold'
+                    : 'text-slate-500 hover:text-slate-900'
+                }`}
+              >
+                Cadastrar Ateliê
+              </button>
+            </div>
+
+            <div className="p-6 sm:p-8 space-y-6">
+              
+              {errorMess && (
+                <div className="p-3 bg-red-50 border border-red-200 text-xs font-semibold text-red-700 rounded-xl leading-normal flex items-start gap-2">
+                  <AlertTriangle className="w-4.5 h-4.5 text-red-600 shrink-0" />
+                  <span>{errorMess}</span>
+                </div>
+              )}
 
           {activeTab === 'login' ? (
             /* LOGIN MODULE */
@@ -1110,6 +1259,8 @@ function AuthScreen({ onLoginSuccess, initialTab = 'login', onBackToLanding, ini
           {/* NO DEMO ACC PANEL */}
 
         </div>
+          </>
+        )}
       </div>
 
     </div>
@@ -1405,7 +1556,13 @@ function ConfiguracoesView({ atelie, onRefresh, onNewAlertTriggered }: Configura
     const handleOnline = () => {
       setIsOnline(true);
       const providers = ['Unitel 4G', 'Movicel LTE', 'Zap Fibra', 'DSTv Net', 'Banda Larga / WiFi'];
-      setConnectionType(providers[Math.floor(Math.random() * providers.length)]);
+      let randomIndex = 0;
+      if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+        const arr = new Uint32Array(1);
+        crypto.getRandomValues(arr);
+        randomIndex = arr[0] % providers.length;
+      }
+      setConnectionType(providers[randomIndex]);
     };
     const handleOffline = () => {
       setIsOnline(false);
@@ -1445,84 +1602,62 @@ function ConfiguracoesView({ atelie, onRefresh, onNewAlertTriggered }: Configura
     localStorage.setItem('flowtailor_sync_mode', mode);
   };
 
-  // Manual Trigger: Persist all recent data directly to Cloud Firestore & Firebase databases
+  // Manual Trigger: Persist all recent data directly to Neon PostgreSQL API
   const handleManualSync = async () => {
-    if (isSyncing || !atelie) return;
+    if (isSyncing) return;
     setIsSyncing(true);
-    setSyncProgress(10);
-    setSyncStageMsg('A preparar dados locais para gravação no Cloud Firestore...');
+    setSyncProgress(15);
+    setSyncStageMsg('A preparar dados locais para sincronização com o Neon PostgreSQL...');
 
     try {
-      // Garantir atelieId explicitamente configurado com o auth.currentUser.uid
-      const currentAtelieId = auth.currentUser?.uid || atelie.id;
-
-      setSyncProgress(25);
-      setSyncStageMsg('A carregar coleções locais (atelies, clientes, encomendas, medidas)...');
-
-      const atelieDoc = localDb.getAtelie(atelie.id) || atelie;
-      const clientesList = localDb.getClientes(atelie.id);
-      const pedidosList = localDb.getPedidos(atelie.id);
-      const medidasList = localDb.getMedidas(atelie.id);
-
-      setSyncProgress(45);
-      setSyncStageMsg('A persistir coleções no Cloud Firestore...');
-
-      // 1. Gravação da coleção 'atelies'
-      const cleanAtelie = sanitizeForFirestore({
-        ...atelieDoc,
-        id: currentAtelieId,
-        atelieId: currentAtelieId
-      });
-      await setDoc(doc(db, 'atelies', currentAtelieId), cleanAtelie, { merge: true });
-
-      // 2. Gravação da coleção 'clientes'
-      for (const cli of clientesList) {
-        const cleanCli = sanitizeForFirestore({
-          ...cli,
-          atelieId: currentAtelieId
+      if (atelie) {
+        const result = await localDb.forceSyncAllToCloud(atelie.id, (progress, msg) => {
+          setSyncProgress(progress);
+          setSyncStageMsg(msg);
         });
-        await setDoc(doc(db, 'clientes', cli.id), cleanCli, { merge: true });
-        await setDoc(doc(db, 'atelies', currentAtelieId, 'clientes', cli.id), cleanCli, { merge: true });
-      }
 
-      // 3. Gravação da coleção 'encomendas'
-      for (const ped of pedidosList) {
-        const cleanPed = sanitizeForFirestore({
-          ...ped,
-          atelieId: currentAtelieId
+        const timeStr = new Date().toLocaleString('pt-AO');
+        setLastSync(timeStr);
+        localStorage.setItem('flowtailor_last_sync', timeStr);
+        setIsSyncing(false);
+
+        if (result.success) {
+          const clientesList = localDb.getClientes(atelie.id);
+          const pedidosList = localDb.getPedidos(atelie.id);
+          const medidasList = localDb.getMedidas(atelie.id);
+          toast.success(`Sucesso! ${result.syncedItemsCount} registos sincronizados com o Neon PostgreSQL.`);
+          alert(`✅ [Sincronização Neon PostgreSQL Concluída]\n\nOs documentos foram persistidos com sucesso na base de dados relacional:\n• Ateliê: ${atelie.nome} (${atelie.id})\n• Clientes: ${clientesList.length} registos na tabela 'clientes'\n• Encomendas: ${pedidosList.length} registos na tabela 'encomendas'\n• Medidas: ${medidasList.length} registos na tabela 'medidas'`);
+        } else {
+          toast.error(`Erro na sincronização: ${result.error}`);
+          alert(`❌ [Falha ao Gravar no Neon PostgreSQL]\n\nOcorreu um erro ao persistir as tabelas na base de dados:\n${result.error}`);
+        }
+      } else {
+        const result = await localDb.forceSyncAdminToCloud((progress, msg) => {
+          setSyncProgress(progress);
+          setSyncStageMsg(msg);
         });
-        await setDoc(doc(db, 'encomendas', ped.id), cleanPed, { merge: true });
-        await setDoc(doc(db, 'atelies', currentAtelieId, 'pedidos', ped.id), cleanPed, { merge: true });
+
+        const timeStr = new Date().toLocaleString('pt-AO');
+        setLastSync(timeStr);
+        localStorage.setItem('flowtailor_last_sync', timeStr);
+        setIsSyncing(false);
+
+        if (result.success) {
+          toast.success(`Sucesso! ${result.syncedItemsCount} registos administrativos gravados no Neon PostgreSQL.`);
+          alert(`✅ [Sincronização Administrativa Neon Concluída]\n\nTodos os documentos de administração foram persistidos com sucesso:\n• Ateliês Cadastrados: ${localDb.getAtelies().length} registos na tabela 'atelies'\n• Solicitações / Comprovativos: ${localDb.getSolicitacoes().length} registos na tabela 'solicitacoes_pagamento'\n• Parâmetros Bancários: gravados na tabela 'configuracoes'\n• Administradores: ${localDb.getAdmins().length} e-mails autorizados na tabela 'admins'`);
+        } else {
+          toast.error(`Erro na sincronização administrativa: ${result.error}`);
+          alert(`❌ [Falha ao Gravar no Neon PostgreSQL]\n\nOcorreu um erro ao persistir dados administrativos:\n${result.error}`);
+        }
       }
-
-      // 4. Gravação da coleção 'medidas'
-      for (const med of medidasList) {
-        const cleanMed = sanitizeForFirestore({
-          ...med,
-          atelieId: currentAtelieId
-        });
-        await setDoc(doc(db, 'medidas', med.id), cleanMed, { merge: true });
-        await setDoc(doc(db, 'atelies', currentAtelieId, 'medidas', med.id), cleanMed, { merge: true });
-      }
-
-      const totalDocs = 1 + clientesList.length + pedidosList.length + medidasList.length;
-      const timeStr = new Date().toLocaleString('pt-AO');
-      setLastSync(timeStr);
-      localStorage.setItem('flowtailor_last_sync', timeStr);
-      setSyncProgress(100);
-      setSyncStageMsg('Sincronização com Cloud Firestore concluída!');
-      setIsSyncing(false);
-
-      toast.success(`Sucesso! ${totalDocs} registos gravados diretamente no Cloud Firestore.`);
-      alert(`✅ [Sincronização com Cloud Firestore Concluída]\n\nOs documentos foram persistidos com sucesso na base de dados:\n• Ateliê: ${currentAtelieId}\n• Clientes: ${clientesList.length} registos gravados na coleção 'clientes'\n• Encomendas: ${pedidosList.length} registos gravados na coleção 'encomendas'\n• Medidas: ${medidasList.length} registos gravados na coleção 'medidas'`);
     } catch (err: any) {
-      console.error('Falha na gravação direta com Cloud Firestore:', err);
+      console.error('Falha na gravação com Neon PostgreSQL:', err);
       setIsSyncing(false);
       setSyncProgress(0);
       setSyncStageMsg('');
       const errorMessage = err?.message || err?.code || String(err);
-      toast.error(`Erro ao gravar no Firestore: ${errorMessage}`);
-      alert(`❌ [Falha ao Gravar no Firestore]\n\nOcorreu um erro ao persistir as coleções na base de dados:\n${errorMessage}\n\nVerifique as permissões de utilizador ou regras do Firestore.`);
+      toast.error(`Erro ao gravar no Neon: ${errorMessage}`);
+      alert(`❌ [Falha ao Gravar no Neon PostgreSQL]\n\nOcorreu um erro ao persistir as tabelas na base de dados:\n${errorMessage}`);
     }
   };
 

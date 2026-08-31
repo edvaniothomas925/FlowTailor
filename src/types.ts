@@ -79,9 +79,12 @@ export interface ConfiguracaoPagamento {
   whatsappAdmin: string; // Mandatory WhatsApp contact
 }
 
+export type UserRole = 'admin' | 'super_admin' | 'atelie_owner' | 'staff' | 'user';
+
 export interface UserSession {
   uid: string;
   email: string | null;
+  role: UserRole;
   isAdmin: boolean;
   atelie?: Atelie | null;
 }

@@ -85,12 +85,10 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(request.url);
 
-  // Bypass API routes, WebSockets, Firebase Auth / Firestore live streams & Browser extensions
+  // Bypass API routes, WebSockets & Browser extensions
   if (
     url.pathname.startsWith('/api/') ||
-    url.protocol === 'chrome-extension:' ||
-    url.hostname.includes('firestore.googleapis.com') ||
-    url.hostname.includes('identitytoolkit.googleapis.com')
+    url.protocol === 'chrome-extension:'
   ) {
     return;
   }

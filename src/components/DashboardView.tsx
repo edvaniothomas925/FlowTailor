@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { localDb } from '../firebase';
+import { localDb } from '../lib/neonStore';
 import { Atelie, Pedido } from '../types';
 import { Scissors, Calendar, Users, DollarSign, Wand2, Smartphone, AlertTriangle, Check, Copy } from 'lucide-react';
 import { generateWhatsAppText } from '../lib/notificationEngine';

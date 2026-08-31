@@ -59,7 +59,7 @@ router.post(
   validateBody(authLoginSchema),
   async (req: Request, res: Response) => {
     const { email, role, atelieId, atelieName, authProvider } = req.body as AuthLoginInput;
-    const userId = `user_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const userId = `user_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`;
 
     const payload: UserJwtPayload = {
       userId,
@@ -296,6 +296,82 @@ router.post('/logout', (req: Request, res: Response) => {
   res.json({
     success: true,
     message: 'Sessão terminada e tokens revogados com sucesso.',
+  });
+});
+
+/**
+ * 6.1. Neon Auth Configuration & Endpoints
+ */
+router.get('/neon/config', (_req: Request, res: Response) => {
+  const authUrl = process.env.NEON_AUTH_URL || 'https://ep-wispy-moon-zab2krf0.neonauth.c-2.eu-west-2.aws.neon.tech/neondb/auth';
+  const jwksUrl = process.env.NEON_JWKS_URL || 'https://ep-wispy-moon-zab2krf0.neonauth.c-2.eu-west-2.aws.neon.tech/neondb/auth/.well-known/jwks.json';
+  
+  res.json({
+    success: true,
+    applicationName: 'flowtailor-db',
+    authUrl,
+    jwksUrl,
+  });
+});
+
+/**
+ * 6.2. Neon Auth OAuth Google Authorization URL
+ */
+router.get('/neon/google-url', (req: Request, res: Response) => {
+  const authUrl = process.env.NEON_AUTH_URL || 'https://ep-wispy-moon-zab2krf0.neonauth.c-2.eu-west-2.aws.neon.tech/neondb/auth';
+  const redirectUri = (req.query.redirect_uri as string) || (process.env.APP_URL ? `${process.env.APP_URL}/auth/callback` : undefined);
+  
+  const params = new URLSearchParams();
+  if (redirectUri) {
+    params.append('redirect_uri', redirectUri);
+  }
+
+  const queryString = params.toString();
+  const fullUrl = `${authUrl}/oauth/google${queryString ? `?${queryString}` : ''}`;
+
+  res.json({
+    success: true,
+    provider: 'google',
+    url: fullUrl,
+    authUrl,
+  });
+});
+
+/**
+ * 6.3. Sync Session from Neon Auth to FlowTailor JWT
+ */
+router.post('/neon/sync-session', async (req: Request, res: Response) => {
+  const { email, displayName, uid, authProvider = 'google_neon' } = req.body;
+  if (!email) {
+    return res.status(400).json({ success: false, error: 'Email é obrigatório para sincronização de sessão.' });
+  }
+
+  const mailLower = String(email).toLowerCase().trim();
+  const initialAdmins = ['edvaniothomas925@gmail.com', 'admin@ateliepro.com', 'admin@flowtailor.ao'];
+  const isAdmin = initialAdmins.includes(mailLower);
+  
+  const userId = uid || (isAdmin ? `admin_${mailLower.split('@')[0]}` : `user_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`);
+
+  const payload: UserJwtPayload = {
+    userId,
+    email: mailLower,
+    role: isAdmin ? 'admin' : 'atelie_owner',
+    atelieName: displayName ? `Ateliê de ${displayName}` : `Ateliê de ${mailLower.split('@')[0]}`,
+    authProvider,
+    sessionCreated: new Date().toISOString(),
+  };
+
+  const tokens = generateTokenPair(payload);
+  res.cookie(REFRESH_COOKIE_NAME, tokens.refreshToken, getRefreshCookieOptions());
+
+  res.json({
+    success: true,
+    message: 'Sessão sincronizada com o Neon Auth com sucesso.',
+    accessToken: tokens.accessToken,
+    tokenType: tokens.tokenType,
+    expiresIn: tokens.expiresIn,
+    user: payload,
+    isAdmin,
   });
 });
 

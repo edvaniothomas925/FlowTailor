@@ -14,6 +14,7 @@ import {
   getSecurityStats,
   logSecurityEvent,
 } from '../services/auditLogger.js';
+import { checkNeonConnection, getNeonDatabaseUrl } from '../db/neon.js';
 
 const router = Router();
 
@@ -46,6 +47,25 @@ router.get('/health', (req: Request, res: Response) => {
     environment: env.NODE_ENV,
     time: new Date().toISOString(),
     securityStatus: 'active',
+  });
+});
+
+// 1.1 Neon Serverless PostgreSQL Probe
+router.get('/neon/status', async (req: Request, res: Response) => {
+  const dbUrl = getNeonDatabaseUrl();
+  if (!dbUrl) {
+    return res.json({
+      status: 'pending_configuration',
+      message: 'DATABASE_URL não configurada ainda. Execute `npx neon@latest init` ou adicione DATABASE_URL no seu ambiente.',
+      configured: false,
+    });
+  }
+
+  const check = await checkNeonConnection();
+  res.json({
+    status: check.connected ? 'connected' : 'error',
+    configured: true,
+    details: check,
   });
 });
 
@@ -257,7 +277,8 @@ Diretrizes de Segurança e Formatação:
         return res.json({ mensagem: defaultMessage });
       }
     } catch (err: any) {
-      res.status(500).json({ error: err.message || 'Erro interno ao processar a mensagem.' });
+      console.error('[API] Erro ao processar mensagem Gemini:', err);
+      res.status(500).json({ error: 'Erro interno ao processar a mensagem.' });
     }
   }
 );

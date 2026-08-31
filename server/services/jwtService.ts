@@ -37,7 +37,7 @@ export function signJwtToken(payload: UserJwtPayload, options?: SignOptions): st
  * Generates a pair of access and refresh tokens and registers the refresh token for rotation
  */
 export function generateTokenPair(payload: UserJwtPayload) {
-  const tokenId = `rt_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  const tokenId = `rt_${Date.now()}_${crypto.randomUUID().replace(/-/g, '')}`;
   const accessToken = signJwtToken({ ...payload, tokenId }, { expiresIn: '2h' });
   const refreshToken = signJwtToken(
     { ...payload, isRefreshToken: true, tokenId } as any,

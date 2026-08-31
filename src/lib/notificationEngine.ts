@@ -1,4 +1,4 @@
-import { localDb } from '../firebase';
+import { localDb } from './neonStore';
 import { Pedido } from '../types';
 
 export interface PushNotificationAlert {
@@ -261,7 +261,7 @@ export function simulateTestNotification(atelieId: string, onNewAlert: (alert: P
 
   // Generate mock expiring order payload
   const mockOrder = {
-    id: `mock_${Math.random().toString(36).substr(2, 9)}`,
+    id: `mock_${typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID().replace(/-/g, '').slice(0, 12) : Date.now().toString(36)}`,
     clienteNome: 'Mariana Gungue',
     clienteTelefone: '+244923456789',
     descricao: 'Vestido de Gala com Renda Africana'

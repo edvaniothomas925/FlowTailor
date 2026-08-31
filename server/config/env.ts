@@ -9,11 +9,16 @@ const envSchema = z.object({
   PORT: z.coerce.number().default(3000),
   GEMINI_API_KEY: z.string().optional(),
   APP_URL: z.string().optional(),
+  VITE_APP_URL: z.string().optional(),
   JWT_SECRET: z.string().default('flowtailor_super_secure_jwt_secret_key_default_2026'),
   JWT_EXPIRES_IN: z.string().default('24h'),
-  CORS_ORIGIN: z.string().default('*'),
+  CORS_ORIGIN: z.string().default(''),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60000),
   RATE_LIMIT_MAX_REQUESTS: z.coerce.number().default(120),
+  DATABASE_URL: z.string().optional(),
+  NEON_DATABASE_URL: z.string().optional(),
+  NEON_AUTH_URL: z.string().default('https://ep-wispy-moon-zab2krf0.neonauth.c-2.eu-west-2.aws.neon.tech/neondb/auth'),
+  NEON_JWKS_URL: z.string().default('https://ep-wispy-moon-zab2krf0.neonauth.c-2.eu-west-2.aws.neon.tech/neondb/auth/.well-known/jwks.json'),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -29,9 +34,14 @@ export const env = parsed.success
       PORT: Number(process.env.PORT) || 3000,
       GEMINI_API_KEY: process.env.GEMINI_API_KEY,
       APP_URL: process.env.APP_URL,
+      VITE_APP_URL: process.env.VITE_APP_URL,
       JWT_SECRET: process.env.JWT_SECRET || 'flowtailor_super_secure_jwt_secret_key_default_2026',
       JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || '24h',
-      CORS_ORIGIN: process.env.CORS_ORIGIN || '*',
+      CORS_ORIGIN: process.env.CORS_ORIGIN || '',
       RATE_LIMIT_WINDOW_MS: Number(process.env.RATE_LIMIT_WINDOW_MS) || 60000,
       RATE_LIMIT_MAX_REQUESTS: Number(process.env.RATE_LIMIT_MAX_REQUESTS) || 120,
+      DATABASE_URL: process.env.DATABASE_URL,
+      NEON_DATABASE_URL: process.env.NEON_DATABASE_URL,
+      NEON_AUTH_URL: process.env.NEON_AUTH_URL || 'https://ep-wispy-moon-zab2krf0.neonauth.c-2.eu-west-2.aws.neon.tech/neondb/auth',
+      NEON_JWKS_URL: process.env.NEON_JWKS_URL || 'https://ep-wispy-moon-zab2krf0.neonauth.c-2.eu-west-2.aws.neon.tech/neondb/auth/.well-known/jwks.json',
     };

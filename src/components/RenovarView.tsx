@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { localDb, customAuth } from '../firebase';
+import { localDb, customAuth } from '../lib/neonStore';
 import { SolicitacaoPagamento, Atelie } from '../types';
 import { CreditCard, Send, Lock, HelpCircle, LogOut, CheckCircle, Smartphone } from 'lucide-react';
 
@@ -36,7 +36,7 @@ export default function RenovarView({ atelie, onLogout, onRefresh }: RenovarView
 
     setTimeout(() => {
       const novaSolicitacao: SolicitacaoPagamento = {
-        id: 'sol_' + Math.random().toString(36).substr(2, 9),
+        id: 'sol_' + (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID().replace(/-/g, '').slice(0, 12) : Date.now().toString(36)),
         atelieId: atelie.id,
         atelieNome: atelie.nome,
         emailOwner: atelie.emailOwner,

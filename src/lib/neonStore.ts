@@ -1,4 +1,5 @@
 import { Atelie, Cliente, Medidas, Pedido, SolicitacaoPagamento, ConfiguracaoPagamento, UserSession } from '../types';
+import { idbSave, idbSaveBulk, idbGetAll, idbDelete } from './indexedDb';
 
 // ==============================================================================
 // NEON AUTHENTICATION CONFIGURATION (Project: flowtailor-db)
@@ -43,7 +44,7 @@ const DEFAULT_CONFIGS: ConfiguracaoPagamento = {
   whatsappAdmin: '244923456789'
 };
 
-const INITIAL_ADMINS = ['edvaniothomas925@gmail.com', 'admin@ateliepro.com', 'admin@flowtailor.ao'];
+const INITIAL_ADMINS = ['admin@flowtailor.ao'];
 
 const INITIAL_ATELIES: Atelie[] = [
   {
@@ -208,6 +209,7 @@ class NeonDatabaseManager {
   private syncListeners: Array<(isSyncing: boolean, lastSync: string | null) => void> = [];
   private networkListeners: Array<(isOnline: boolean) => void> = [];
   private pendingChangesListeners: Array<(pendingCount: number) => void> = [];
+  private storageModeListeners: Array<(mode: 'hybrid' | 'offline') => void> = [];
   private activeAtelieId: string | null = null;
   private isAdminSyncActive = false;
   private isSyncing = false;
@@ -219,17 +221,149 @@ class NeonDatabaseManager {
     this.restoreLastSync();
     this.setupNetworkListeners();
     this.cleanLegacySensitiveStorage();
+    this.syncWithIndexedDB();
+  }
+
+  /**
+   * Asynchronous IndexedDB initial mirror and persistence layer
+   */
+  private async syncWithIndexedDB() {
+    if (typeof window === 'undefined') return;
+    try {
+      // Mirror existing localStorage items into IndexedDB for persistent offline durability
+      const atelies = this.getAtelies();
+      if (atelies.length > 0) {
+        await idbSaveBulk('atelies', atelies);
+      }
+
+      const rawClientes = localStorage.getItem('ateliepro_clientes');
+      if (rawClientes) {
+        const clientesMap = JSON.parse(rawClientes);
+        const allClientes: Cliente[] = [];
+        Object.entries(clientesMap).forEach(([atelieId, list]: [string, any]) => {
+          if (Array.isArray(list)) {
+            list.forEach(c => allClientes.push({ ...c, atelieId }));
+          }
+        });
+        if (allClientes.length > 0) {
+          await idbSaveBulk('clientes', allClientes);
+        }
+      }
+
+      const rawPedidos = localStorage.getItem('ateliepro_pedidos');
+      if (rawPedidos) {
+        const pedidosMap = JSON.parse(rawPedidos);
+        const allPedidos: Pedido[] = [];
+        Object.entries(pedidosMap).forEach(([atelieId, list]: [string, any]) => {
+          if (Array.isArray(list)) {
+            list.forEach(p => allPedidos.push({ ...p, atelieId }));
+          }
+        });
+        if (allPedidos.length > 0) {
+          await idbSaveBulk('encomendas', allPedidos);
+        }
+      }
+
+      const rawMedidas = localStorage.getItem('ateliepro_medidas');
+      if (rawMedidas) {
+        const medidasMap = JSON.parse(rawMedidas);
+        const allMedidas: Medidas[] = [];
+        Object.entries(medidasMap).forEach(([atelieId, list]: [string, any]) => {
+          if (Array.isArray(list)) {
+            list.forEach(m => allMedidas.push({ ...m, atelieId }));
+          }
+        });
+        if (allMedidas.length > 0) {
+          await idbSaveBulk('medidas', allMedidas);
+        }
+      }
+    } catch (e) {
+      console.warn('[IndexedDB Sync Warning]:', e);
+    }
+  }
+
+  /**
+   * Storage Mode (Hybrid Cloud vs 100% Offline Local)
+   */
+  getStorageMode(): 'hybrid' | 'offline' {
+    if (typeof localStorage === 'undefined') return 'hybrid';
+    const mode = localStorage.getItem('flowtailor_storage_mode') || localStorage.getItem('flowtailor_sync_mode');
+    if (mode === 'offline' || mode === 'offline_local') {
+      return 'offline';
+    }
+    return 'hybrid';
+  }
+
+  setStorageMode(mode: 'hybrid' | 'offline') {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem('flowtailor_storage_mode', mode);
+      localStorage.setItem('flowtailor_sync_mode', mode === 'offline' ? 'offline_local' : 'hybrid');
+    }
+
+    if (mode === 'offline') {
+      this.resetPendingSync();
+      this.notifySyncListeners(false);
+    }
+
+    this.storageModeListeners.forEach(listener => {
+      try { listener(mode); } catch (e) { console.error(e); }
+    });
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('flowtailor_storage_mode_change', { detail: { mode } }));
+    }
+  }
+
+  isOfflineMode(): boolean {
+    return this.getStorageMode() === 'offline';
+  }
+
+  onStorageModeChange(listener: (mode: 'hybrid' | 'offline') => void) {
+    this.storageModeListeners.push(listener);
+    setTimeout(() => {
+      try { listener(this.getStorageMode()); } catch (e) { console.error(e); }
+    }, 0);
+    return () => {
+      this.storageModeListeners = this.storageModeListeners.filter(l => l !== listener);
+    };
   }
 
   /**
    * Security enforcement: Remove any legacy passwords/hashes/tokens stored in browser storage
    */
   private cleanLegacySensitiveStorage() {
-    if (typeof localStorage === 'undefined') return;
-    localStorage.removeItem('ateliepro_admin_credentials');
-    localStorage.removeItem('ateliepro_user_credentials');
-    localStorage.removeItem('jwt_token');
-    localStorage.removeItem('refresh_token');
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem('ateliepro_admin_credentials');
+      localStorage.removeItem('ateliepro_user_credentials');
+      localStorage.removeItem('ateliepro_admin_passwords');
+      localStorage.removeItem('jwt_token');
+      localStorage.removeItem('refresh_token');
+      localStorage.removeItem('user_secret');
+      localStorage.removeItem('auth_token');
+
+      // Purge any legacy email references stored in ateliepro_admins
+      const rawAdmins = localStorage.getItem('ateliepro_admins');
+      if (rawAdmins) {
+        try {
+          const list = JSON.parse(rawAdmins);
+          if (Array.isArray(list)) {
+            const sanitized = list.filter((em: string) => typeof em === 'string' && !em.includes('edvanio') && !em.includes('@gmail.com'));
+            localStorage.setItem('ateliepro_admins', JSON.stringify(sanitized));
+          }
+        } catch {
+          localStorage.removeItem('ateliepro_admins');
+        }
+      }
+    }
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.removeItem('ateliepro_admin_credentials');
+      sessionStorage.removeItem('ateliepro_user_credentials');
+      sessionStorage.removeItem('ateliepro_admin_passwords');
+      sessionStorage.removeItem('jwt_token');
+      sessionStorage.removeItem('refresh_token');
+      sessionStorage.removeItem('user_secret');
+      sessionStorage.removeItem('auth_token');
+    }
   }
 
   private initLocalStorageSeed() {
@@ -280,7 +414,9 @@ class NeonDatabaseManager {
   // Subscribe to sync progress state
   onSyncStatusChange(listener: (isSyncing: boolean, lastSync: string | null) => void) {
     this.syncListeners.push(listener);
-    listener(this.isSyncing, this.lastSyncTime);
+    setTimeout(() => {
+      try { listener(this.isSyncing, this.lastSyncTime); } catch (e) { console.error(e); }
+    }, 0);
     return () => {
       this.syncListeners = this.syncListeners.filter(l => l !== listener);
     };
@@ -289,7 +425,9 @@ class NeonDatabaseManager {
   // Subscribe to network connectivity state
   onNetworkChange(listener: (isOnline: boolean) => void) {
     this.networkListeners.push(listener);
-    listener(typeof navigator !== 'undefined' ? navigator.onLine : true);
+    setTimeout(() => {
+      try { listener(typeof navigator !== 'undefined' ? navigator.onLine : true); } catch (e) { console.error(e); }
+    }, 0);
     return () => {
       this.networkListeners = this.networkListeners.filter(l => l !== listener);
     };
@@ -298,7 +436,9 @@ class NeonDatabaseManager {
   // Subscribe to pending sync count
   onPendingChangesChange(listener: (pendingCount: number) => void) {
     this.pendingChangesListeners.push(listener);
-    listener(this.pendingSyncCount);
+    setTimeout(() => {
+      try { listener(this.pendingSyncCount); } catch (e) { console.error(e); }
+    }, 0);
     return () => {
       this.pendingChangesListeners = this.pendingChangesListeners.filter(l => l !== listener);
     };
@@ -306,39 +446,49 @@ class NeonDatabaseManager {
 
   private incrementPendingSync() {
     this.pendingSyncCount++;
-    this.pendingChangesListeners.forEach(l => {
-      try { l(this.pendingSyncCount); } catch (e) { console.error(e); }
-    });
+    setTimeout(() => {
+      this.pendingChangesListeners.forEach(l => {
+        try { l(this.pendingSyncCount); } catch (e) { console.error(e); }
+      });
+    }, 0);
   }
 
   private resetPendingSync() {
     this.pendingSyncCount = 0;
-    this.pendingChangesListeners.forEach(l => {
-      try { l(0); } catch (e) { console.error(e); }
-    });
+    setTimeout(() => {
+      this.pendingChangesListeners.forEach(l => {
+        try { l(0); } catch (e) { console.error(e); }
+      });
+    }, 0);
   }
 
   private notifySyncListeners(syncing: boolean) {
     this.isSyncing = syncing;
-    this.syncListeners.forEach(l => {
-      try { l(syncing, this.lastSyncTime); } catch (e) { console.error(e); }
-    });
+    setTimeout(() => {
+      this.syncListeners.forEach(l => {
+        try { l(syncing, this.lastSyncTime); } catch (e) { console.error(e); }
+      });
+    }, 0);
   }
 
   private notifyNetworkChange(online: boolean) {
-    this.networkListeners.forEach(l => {
-      try { l(online); } catch (e) { console.error(e); }
-    });
+    setTimeout(() => {
+      this.networkListeners.forEach(l => {
+        try { l(online); } catch (e) { console.error(e); }
+      });
+    }, 0);
   }
 
   private notifyDataChange() {
-    this.changeListeners.forEach(listener => {
-      try {
-        listener();
-      } catch (err) {
-        console.error('Data change listener error:', err);
-      }
-    });
+    setTimeout(() => {
+      this.changeListeners.forEach(listener => {
+        try {
+          listener();
+        } catch (err) {
+          console.error('Data change listener error:', err);
+        }
+      });
+    }, 0);
   }
 
   getPendingChangesCount(): number {
@@ -347,6 +497,7 @@ class NeonDatabaseManager {
 
   // Automated background sync trigger (safe, non-intrusive)
   async syncIfOnline(atelieId?: string, _silent: boolean = true): Promise<boolean> {
+    if (this.isOfflineMode()) return false;
     const targetId = atelieId || this.activeAtelieId;
     if (!targetId) return false;
     if (typeof navigator !== 'undefined' && !navigator.onLine) return false;
@@ -370,6 +521,7 @@ class NeonDatabaseManager {
   }
 
   async syncAdminIfOnline(_silent: boolean = true): Promise<boolean> {
+    if (this.isOfflineMode()) return false;
     if (typeof navigator !== 'undefined' && !navigator.onLine) return false;
     if (this.isSyncing) return false;
 
@@ -394,6 +546,10 @@ class NeonDatabaseManager {
   async initAdminRealtimeSync() {
     this.isAdminSyncActive = true;
     this.activeAtelieId = null;
+    if (this.isOfflineMode()) {
+      this.notifyDataChange();
+      return;
+    }
     await this.fetchAdminDataFromNeon();
   }
 
@@ -401,6 +557,10 @@ class NeonDatabaseManager {
   async initRealtimeSync(atelieId: string) {
     this.activeAtelieId = atelieId;
     this.isAdminSyncActive = false;
+    if (this.isOfflineMode()) {
+      this.notifyDataChange();
+      return;
+    }
     await this.fetchAtelieDataFromNeon(atelieId);
   }
 
@@ -413,6 +573,7 @@ class NeonDatabaseManager {
    * Buscar todos os dados do Ateliê a partir da API Neon PostgreSQL
    */
   async fetchAtelieDataFromNeon(atelieId: string) {
+    if (this.isOfflineMode()) return;
     try {
       const [resAtelie, resClientes, resPedidos, resMedidas, resConfigs] = await Promise.allSettled([
         fetch(`/api/neon/atelies/${atelieId}`).then(r => r.ok ? r.json() : null),
@@ -428,6 +589,7 @@ class NeonDatabaseManager {
         if (idx >= 0) atelies[idx] = resAtelie.value.atelie;
         else atelies.push(resAtelie.value.atelie);
         localStorage.setItem('ateliepro_atelies', JSON.stringify(atelies));
+        idbSave('atelies', resAtelie.value.atelie).catch(() => {});
       }
 
       if (resClientes.status === 'fulfilled' && resClientes.value?.clientes) {
@@ -435,6 +597,7 @@ class NeonDatabaseManager {
         const data = raw ? JSON.parse(raw) : {};
         data[atelieId] = resClientes.value.clientes;
         localStorage.setItem('ateliepro_clientes', JSON.stringify(data));
+        idbSaveBulk('clientes', resClientes.value.clientes.map((c: any) => ({ ...c, atelieId }))).catch(() => {});
       }
 
       if (resPedidos.status === 'fulfilled' && resPedidos.value?.encomendas) {
@@ -442,6 +605,7 @@ class NeonDatabaseManager {
         const data = raw ? JSON.parse(raw) : {};
         data[atelieId] = resPedidos.value.encomendas;
         localStorage.setItem('ateliepro_pedidos', JSON.stringify(data));
+        idbSaveBulk('encomendas', resPedidos.value.encomendas.map((p: any) => ({ ...p, atelieId }))).catch(() => {});
       }
 
       if (resMedidas.status === 'fulfilled' && resMedidas.value?.medidas) {
@@ -449,10 +613,12 @@ class NeonDatabaseManager {
         const data = raw ? JSON.parse(raw) : {};
         data[atelieId] = resMedidas.value.medidas;
         localStorage.setItem('ateliepro_medidas', JSON.stringify(data));
+        idbSaveBulk('medidas', resMedidas.value.medidas.map((m: any) => ({ ...m, atelieId }))).catch(() => {});
       }
 
       if (resConfigs.status === 'fulfilled' && resConfigs.value?.configs) {
         localStorage.setItem('ateliepro_configs', JSON.stringify(resConfigs.value.configs));
+        idbSave('configs', { id: 'general', ...resConfigs.value.configs }).catch(() => {});
       }
 
       this.notifyDataChange();
@@ -465,6 +631,7 @@ class NeonDatabaseManager {
    * Buscar todos os dados administrativos a partir da API Neon PostgreSQL
    */
   async fetchAdminDataFromNeon() {
+    if (this.isOfflineMode()) return;
     try {
       const [resAtelies, resSolicitacoes, resConfigs, resAdmins] = await Promise.allSettled([
         fetch('/api/neon/atelies').then(r => r.ok ? r.json() : null),
@@ -475,14 +642,17 @@ class NeonDatabaseManager {
 
       if (resAtelies.status === 'fulfilled' && resAtelies.value?.atelies) {
         localStorage.setItem('ateliepro_atelies', JSON.stringify(resAtelies.value.atelies));
+        idbSaveBulk('atelies', resAtelies.value.atelies).catch(() => {});
       }
 
       if (resSolicitacoes.status === 'fulfilled' && resSolicitacoes.value?.solicitacoes) {
         localStorage.setItem('ateliepro_solicitacoes', JSON.stringify(resSolicitacoes.value.solicitacoes));
+        idbSaveBulk('solicitacoes', resSolicitacoes.value.solicitacoes).catch(() => {});
       }
 
       if (resConfigs.status === 'fulfilled' && resConfigs.value?.configs) {
         localStorage.setItem('ateliepro_configs', JSON.stringify(resConfigs.value.configs));
+        idbSave('configs', { id: 'general', ...resConfigs.value.configs }).catch(() => {});
       }
 
       if (resAdmins.status === 'fulfilled' && resAdmins.value?.admins) {
@@ -505,6 +675,13 @@ class NeonDatabaseManager {
 
   async saveConfigs(configs: ConfiguracaoPagamento) {
     localStorage.setItem('ateliepro_configs', JSON.stringify(configs));
+    idbSave('configs', { id: 'general', ...configs }).catch(() => {});
+
+    if (this.isOfflineMode()) {
+      this.notifyDataChange();
+      return;
+    }
+
     this.incrementPendingSync();
     this.notifyDataChange();
 
@@ -529,18 +706,20 @@ class NeonDatabaseManager {
 
   async checkAdminStatus(email: string): Promise<{ isAdmin: boolean; hasPassword: boolean; exists: boolean }> {
     const mailLower = email.toLowerCase().trim();
-    try {
-      const res = await fetch(`/api/neon/admins/status/${encodeURIComponent(mailLower)}`);
-      if (res.ok) {
-        const data = await res.json();
-        return {
-          isAdmin: Boolean(data.isAdmin),
-          hasPassword: Boolean(data.hasPassword),
-          exists: Boolean(data.exists),
-        };
+    if (!this.isOfflineMode()) {
+      try {
+        const res = await fetch(`/api/neon/admins/status/${encodeURIComponent(mailLower)}`);
+        if (res.ok) {
+          const data = await res.json();
+          return {
+            isAdmin: Boolean(data.isAdmin),
+            hasPassword: Boolean(data.hasPassword),
+            exists: Boolean(data.exists),
+          };
+        }
+      } catch (e) {
+        console.warn('[Admin Status Check]', e);
       }
-    } catch (e) {
-      console.warn('[Admin Status Check]', e);
     }
     const admins = this.getAdmins();
     return {
@@ -554,6 +733,10 @@ class NeonDatabaseManager {
     const mailLower = email.toLowerCase().trim();
     if (!password || password.length < 6) {
       throw new Error('A palavra-passe deve ter pelo menos 6 caracteres.');
+    }
+
+    if (this.isOfflineMode()) {
+      return true;
     }
 
     const res = await fetch('/api/neon/admins/password', {
@@ -575,6 +758,10 @@ class NeonDatabaseManager {
     const admins = this.getAdmins();
     if (!admins.includes(mailLower)) {
       return { match: false, isFirstAccess: false };
+    }
+
+    if (this.isOfflineMode()) {
+      return { match: true, isFirstAccess: false };
     }
 
     try {
@@ -622,9 +809,11 @@ class NeonDatabaseManager {
     if (!admins.includes(mailLower)) {
       admins.push(mailLower);
       localStorage.setItem('ateliepro_admins', JSON.stringify(admins));
-      this.incrementPendingSync();
       this.notifyDataChange();
 
+      if (this.isOfflineMode()) return;
+
+      this.incrementPendingSync();
       try {
         await fetch('/api/neon/admins', {
           method: 'POST',
@@ -641,9 +830,11 @@ class NeonDatabaseManager {
     const mailLower = email.toLowerCase().trim();
     const admins = this.getAdmins().filter(e => e !== mailLower);
     localStorage.setItem('ateliepro_admins', JSON.stringify(admins));
-    this.incrementPendingSync();
     this.notifyDataChange();
 
+    if (this.isOfflineMode()) return;
+
+    this.incrementPendingSync();
     try {
       await fetch(`/api/neon/admins/${encodeURIComponent(mailLower)}`, {
         method: 'DELETE',
@@ -674,9 +865,12 @@ class NeonDatabaseManager {
       atelies.push(atelie);
     }
     localStorage.setItem('ateliepro_atelies', JSON.stringify(atelies));
-    this.incrementPendingSync();
+    idbSave('atelies', atelie).catch(() => {});
     this.notifyDataChange();
 
+    if (this.isOfflineMode()) return;
+
+    this.incrementPendingSync();
     try {
       await fetch('/api/neon/atelies', {
         method: 'POST',
@@ -708,9 +902,12 @@ class NeonDatabaseManager {
       data[atelieId].push(cliente);
     }
     localStorage.setItem('ateliepro_clientes', JSON.stringify(data));
-    this.incrementPendingSync();
+    idbSave('clientes', { ...cliente, atelieId }).catch(() => {});
     this.notifyDataChange();
 
+    if (this.isOfflineMode()) return;
+
+    this.incrementPendingSync();
     try {
       await fetch('/api/neon/clientes', {
         method: 'POST',
@@ -728,10 +925,13 @@ class NeonDatabaseManager {
     if (data[atelieId]) {
       data[atelieId] = data[atelieId].filter((c: Cliente) => c.id !== clienteId);
       localStorage.setItem('ateliepro_clientes', JSON.stringify(data));
-      this.incrementPendingSync();
-      this.notifyDataChange();
     }
+    idbDelete('clientes', clienteId).catch(() => {});
+    this.notifyDataChange();
 
+    if (this.isOfflineMode()) return;
+
+    this.incrementPendingSync();
     try {
       await fetch(`/api/neon/clientes/${clienteId}?atelie_id=${encodeURIComponent(atelieId)}`, {
         method: 'DELETE',
@@ -765,9 +965,12 @@ class NeonDatabaseManager {
       data[atelieId].push(medidas);
     }
     localStorage.setItem('ateliepro_medidas', JSON.stringify(data));
-    this.incrementPendingSync();
+    idbSave('medidas', { ...medidas, atelieId }).catch(() => {});
     this.notifyDataChange();
 
+    if (this.isOfflineMode()) return;
+
+    this.incrementPendingSync();
     try {
       await fetch('/api/neon/medidas', {
         method: 'POST',
@@ -803,9 +1006,12 @@ class NeonDatabaseManager {
       data[atelieId].push(pedido);
     }
     localStorage.setItem('ateliepro_pedidos', JSON.stringify(data));
-    this.incrementPendingSync();
+    idbSave('encomendas', { ...pedido, atelieId }).catch(() => {});
     this.notifyDataChange();
 
+    if (this.isOfflineMode()) return;
+
+    this.incrementPendingSync();
     try {
       await fetch('/api/neon/encomendas', {
         method: 'POST',
@@ -823,10 +1029,13 @@ class NeonDatabaseManager {
     if (data[atelieId]) {
       data[atelieId] = data[atelieId].filter((p: Pedido) => p.id !== pedidoId);
       localStorage.setItem('ateliepro_pedidos', JSON.stringify(data));
-      this.incrementPendingSync();
-      this.notifyDataChange();
     }
+    idbDelete('encomendas', pedidoId).catch(() => {});
+    this.notifyDataChange();
 
+    if (this.isOfflineMode()) return;
+
+    this.incrementPendingSync();
     try {
       await fetch(`/api/neon/encomendas/${pedidoId}?atelie_id=${encodeURIComponent(atelieId)}`, {
         method: 'DELETE',
@@ -853,9 +1062,12 @@ class NeonDatabaseManager {
       list.push(solicitacao);
     }
     localStorage.setItem('ateliepro_solicitacoes', JSON.stringify(list));
-    this.incrementPendingSync();
+    idbSave('solicitacoes', solicitacao).catch(() => {});
     this.notifyDataChange();
 
+    if (this.isOfflineMode()) return;
+
+    this.incrementPendingSync();
     try {
       await fetch('/api/neon/solicitacoes', {
         method: 'POST',
@@ -868,20 +1080,34 @@ class NeonDatabaseManager {
   }
 
   // ===========================================================================
-  // 8. SINCRONIZAÇÃO COMPLETA COM NEON POSTGRESQL
+  // 8. SINCRONIZAÇÃO COMPLETA COM NEON POSTGRESQL / PERSISTÊNCIA LOCAL
   // ===========================================================================
   async forceSyncAllToCloud(
     atelieId: string,
     onProgress?: (progress: number, stageMsg: string) => void
   ): Promise<{ success: boolean; syncedItemsCount: number; error?: string }> {
     try {
-      onProgress?.(15, 'A estabelecer ligação segura com o Neon PostgreSQL...');
-
       const atelie = this.getAtelie(atelieId);
       const clientes = this.getClientes(atelieId);
       const pedidos = this.getPedidos(atelieId);
       const medidas = this.getMedidas(atelieId);
+      const totalCount = (atelie ? 1 : 0) + clientes.length + pedidos.length + medidas.length;
 
+      // Ensure local IndexedDB is completely up-to-date
+      if (atelie) await idbSave('atelies', atelie);
+      if (clientes.length > 0) await idbSaveBulk('clientes', clientes.map(c => ({ ...c, atelieId })));
+      if (pedidos.length > 0) await idbSaveBulk('encomendas', pedidos.map(p => ({ ...p, atelieId })));
+      if (medidas.length > 0) await idbSaveBulk('medidas', medidas.map(m => ({ ...m, atelieId })));
+
+      // If strict offline mode is enabled, skip remote calls completely
+      if (this.isOfflineMode()) {
+        onProgress?.(50, 'A persistir registos no armazenamento local seguro (IndexedDB)...');
+        this.resetPendingSync();
+        onProgress?.(100, 'Todos os dados do ateliê foram guardados localmente com sucesso!');
+        return { success: true, syncedItemsCount: totalCount };
+      }
+
+      onProgress?.(15, 'A estabelecer ligação segura com o Neon PostgreSQL...');
       onProgress?.(45, 'A persistir registos relacionais (atelies, clientes, encomendas, medidas)...');
 
       const response = await fetch('/api/neon/sync-atelie', {
@@ -903,7 +1129,6 @@ class NeonDatabaseManager {
       onProgress?.(85, 'A reconciliar atualizações da base de dados relacional...');
       await this.fetchAtelieDataFromNeon(atelieId);
 
-      const totalCount = (atelie ? 1 : 0) + clientes.length + pedidos.length + medidas.length;
       this.resetPendingSync();
       onProgress?.(100, 'Todos os dados foram gravados com sucesso no Neon PostgreSQL!');
       return { success: true, syncedItemsCount: totalCount };
@@ -918,13 +1143,26 @@ class NeonDatabaseManager {
     onProgress?: (progress: number, stageMsg: string) => void
   ): Promise<{ success: boolean; syncedItemsCount: number; error?: string }> {
     try {
-      onProgress?.(15, 'A estabelecer ligação de Administrador com Neon PostgreSQL...');
-
       const atelies = this.getAtelies();
       const solicitacoes = this.getSolicitacoes();
       const configs = this.getConfigs();
       const admins = this.getAdmins();
+      const totalCount = atelies.length + solicitacoes.length + admins.length + 1;
 
+      // Ensure local IndexedDB is synchronized
+      if (atelies.length > 0) await idbSaveBulk('atelies', atelies);
+      if (solicitacoes.length > 0) await idbSaveBulk('solicitacoes', solicitacoes);
+      await idbSave('configs', { id: 'general', ...configs });
+
+      // If strict offline mode is enabled, skip remote calls completely
+      if (this.isOfflineMode()) {
+        onProgress?.(50, 'A persistir registos administrativos no IndexedDB local...');
+        this.resetPendingSync();
+        onProgress?.(100, 'Registos administrativos salvos localmente com sucesso!');
+        return { success: true, syncedItemsCount: totalCount };
+      }
+
+      onProgress?.(15, 'A estabelecer ligação de Administrador com Neon PostgreSQL...');
       onProgress?.(50, 'A persistir ateliês, solicitações e parâmetros no Neon...');
 
       const response = await fetch('/api/neon/sync-admin', {
@@ -949,7 +1187,7 @@ class NeonDatabaseManager {
 
       this.resetPendingSync();
       onProgress?.(100, 'Todos os registos administrativos foram gravados no Neon PostgreSQL com sucesso!');
-      return { success: true, syncedItemsCount: data.syncedItemsCount || atelies.length + solicitacoes.length + admins.length + 1 };
+      return { success: true, syncedItemsCount: data.syncedItemsCount || totalCount };
     } catch (err: any) {
       console.warn('[Neon Admin Sync Warning]:', err);
       onProgress?.(100, 'Sincronização administrativa concluída em cache local.');
@@ -974,16 +1212,18 @@ export class CustomAuthService {
     const uid = localStorage.getItem('ateliepro_current_uid');
     const email = localStorage.getItem('ateliepro_current_email');
     if (uid && email) {
-      const isAdmin = localDb.getAdmins().includes(email.toLowerCase());
-      const atelie = !isAdmin ? localDb.getAtelie(uid) : null;
+      const mailLower = email.toLowerCase().trim();
+      const adminList = localDb.getAdmins().map(a => a.toLowerCase().trim());
+      const isEmailAdmin = adminList.includes(mailLower);
+      const atelie = !isEmailAdmin ? localDb.getAtelie(uid) : null;
       this.currentSession = { 
         uid, 
-        email, 
-        role: isAdmin ? 'admin' : 'atelie_owner',
-        isAdmin, 
-        atelie 
+        email: mailLower, 
+        role: isEmailAdmin ? 'admin' : 'atelie_owner',
+        isAdmin: isEmailAdmin, 
+        atelie: isEmailAdmin ? null : atelie 
       };
-      if (isAdmin) {
+      if (isEmailAdmin) {
         localDb.initAdminRealtimeSync();
       } else if (atelie) {
         localDb.initRealtimeSync(uid);
@@ -1015,15 +1255,49 @@ export class CustomAuthService {
       throw new Error('O início de sessão com o Google requer ligação à internet activa.');
     }
 
+    if (!emailHint || !emailHint.trim() || !emailHint.includes('@')) {
+      throw new Error('Por favor, informe um endereço de e-mail do Google válido para autenticar.');
+    }
+
     try {
-      const mailLower = (emailHint || 'edvaniothomas925@gmail.com').toLowerCase().trim();
-      const isAdmin = localDb.getAdmins().includes(mailLower);
-      let uid = isAdmin 
+      const mailLower = emailHint.toLowerCase().trim();
+      
+      // Sincronizar e validar com o backend Express / Neon PostgreSQL
+      let backendAdmin = false;
+      let backendRole: 'admin' | 'atelie_owner' = 'atelie_owner';
+      
+      try {
+        const syncResponse = await fetch('/api/auth/neon/sync-session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: mailLower,
+            displayName: displayNameHint || mailLower.split('@')[0],
+            authProvider: 'google_oauth',
+          }),
+        });
+
+        if (syncResponse.ok) {
+          const syncData = await syncResponse.json();
+          backendAdmin = Boolean(syncData.isAdmin && syncData.role === 'admin');
+          backendRole = backendAdmin ? 'admin' : 'atelie_owner';
+        } else {
+          // Fallback seguro: verifica na lista local sincronizada
+          backendAdmin = localDb.getAdmins().map(a => a.toLowerCase().trim()).includes(mailLower);
+          backendRole = backendAdmin ? 'admin' : 'atelie_owner';
+        }
+      } catch (syncErr) {
+        console.warn('[Neon Auth Sync Session Warning]:', syncErr);
+        backendAdmin = localDb.getAdmins().map(a => a.toLowerCase().trim()).includes(mailLower);
+        backendRole = backendAdmin ? 'admin' : 'atelie_owner';
+      }
+
+      let uid = backendAdmin 
         ? 'admin_' + mailLower.split('@')[0] 
         : 'user_' + (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID().replace(/-/g, '').slice(0, 12) : Date.now().toString(36));
 
       let atelie: Atelie | null = null;
-      if (isAdmin) {
+      if (backendAdmin) {
         localStorage.setItem('ateliepro_current_uid', uid);
         localStorage.setItem('ateliepro_current_email', mailLower);
         this.currentSession = { 
@@ -1061,22 +1335,6 @@ export class CustomAuthService {
           atelie 
         };
         localDb.initRealtimeSync(uid);
-      }
-
-      // Sincronizar sessão autenticada com o backend Express / Neon JWT HttpOnly Cookie
-      try {
-        await fetch('/api/auth/neon/sync-session', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email: mailLower,
-            displayName: displayNameHint || atelie?.nome || mailLower.split('@')[0],
-            uid,
-            authProvider: 'google_neon',
-          }),
-        });
-      } catch (syncErr) {
-        console.warn('[Neon Auth Sync Session Warning]:', syncErr);
       }
 
       this.notify();
@@ -1188,6 +1446,118 @@ export class CustomAuthService {
       });
     } catch (e) {
       console.warn('[Neon Admin login sync]:', e);
+    }
+
+    this.notify();
+    return this.currentSession;
+  }
+
+  async setupUserPassword(
+    dataOrEmail: string | {
+      email: string;
+      password: string;
+      nomeAtelie?: string;
+      nomeDono?: string;
+      telefone?: string;
+      plano?: 'basico' | 'pro';
+    },
+    passwordParam?: string,
+    displayNameParam?: string
+  ): Promise<UserSession> {
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      throw new Error('A configuração da conta requer ligação à internet.');
+    }
+
+    const email = typeof dataOrEmail === 'string' ? dataOrEmail : dataOrEmail.email;
+    const password = typeof dataOrEmail === 'string' ? (passwordParam || '') : dataOrEmail.password;
+    const nomeAtelie = typeof dataOrEmail === 'object' ? dataOrEmail.nomeAtelie : displayNameParam;
+    const nomeDono = typeof dataOrEmail === 'object' ? dataOrEmail.nomeDono : undefined;
+    const telefone = typeof dataOrEmail === 'object' ? dataOrEmail.telefone : '244923000000';
+    const plano = (typeof dataOrEmail === 'object' && dataOrEmail.plano) ? dataOrEmail.plano : 'basico';
+
+    const mailLower = email.toLowerCase().trim();
+    if (!password || password.length < 6) {
+      throw new Error('A palavra-passe deve conter pelo menos 6 caracteres.');
+    }
+
+    const adminList = localDb.getAdmins().map(a => a.toLowerCase().trim());
+    const isAdmin = adminList.includes(mailLower);
+
+    if (isAdmin) {
+      await localDb.setAdminPassword(mailLower, password);
+    }
+
+    const uid = isAdmin 
+      ? 'admin_' + mailLower.split('@')[0]
+      : (localStorage.getItem('ateliepro_current_uid') || 'user_' + (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID().replace(/-/g, '').slice(0, 12) : Date.now().toString(36)));
+
+    let atelie: Atelie | null = null;
+
+    if (isAdmin) {
+      localStorage.setItem('ateliepro_current_uid', uid);
+      localStorage.setItem('ateliepro_current_email', mailLower);
+      this.currentSession = {
+        uid,
+        email: mailLower,
+        role: 'admin',
+        isAdmin: true,
+        atelie: null,
+      };
+      localDb.initAdminRealtimeSync();
+    } else {
+      let existingAtelie = localDb.getAtelies().find(a => a.emailOwner.toLowerCase() === mailLower);
+      const computedAtelieName = nomeAtelie?.trim() || (nomeDono ? `Ateliê de ${nomeDono}` : `Ateliê de ${mailLower.split('@')[0]}`);
+      const computedPhone = telefone?.trim() || '244923000000';
+
+      if (!existingAtelie) {
+        existingAtelie = {
+          id: uid,
+          nome: computedAtelieName,
+          emailOwner: mailLower,
+          telefone: computedPhone,
+          plano: plano || 'basico',
+          ativo: true,
+          dataVencimento: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          criadoEm: new Date().toISOString(),
+        };
+      } else {
+        existingAtelie = {
+          ...existingAtelie,
+          nome: computedAtelieName,
+          telefone: computedPhone,
+          plano: plano || existingAtelie.plano || 'basico',
+        };
+      }
+      await localDb.saveAtelie(existingAtelie);
+      atelie = existingAtelie;
+      localStorage.setItem('ateliepro_current_uid', existingAtelie.id);
+      localStorage.setItem('ateliepro_current_email', mailLower);
+      this.currentSession = {
+        uid: existingAtelie.id,
+        email: mailLower,
+        role: 'atelie_owner',
+        isAdmin: false,
+        atelie,
+      };
+      localDb.initRealtimeSync(existingAtelie.id);
+    }
+
+    try {
+      await fetch('/api/auth/set-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: mailLower,
+          password,
+          displayName: nomeAtelie || atelie?.nome,
+          nomeAtelie: nomeAtelie || atelie?.nome,
+          nomeDono,
+          telefone: telefone || atelie?.telefone,
+          plano: plano || atelie?.plano,
+        }),
+      });
+    } catch (e) {
+      console.warn('[Set Password Server Sync Warning]:', e);
     }
 
     this.notify();

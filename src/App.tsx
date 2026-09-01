@@ -64,6 +64,7 @@ import {
   Terminal,
   FileLock2,
   Eye,
+  EyeOff,
   History,
   Users,
   Brain,
@@ -121,8 +122,14 @@ export function AtelieAvatar({
 }
 
 export default function App() {
-  const [session, setSession] = useState<UserSession | null>(customAuth.getCurrentUser());
-  const [atelie, setAtelie] = useState<Atelie | null>(null);
+  const [session, setSession] = useState<UserSession | null>(() => customAuth.getCurrentUser());
+  const [atelie, setAtelie] = useState<Atelie | null>(() => {
+    const currentSession = customAuth.getCurrentUser();
+    if (currentSession && !currentSession.isAdmin) {
+      return localDb.getAtelies().find(a => a.emailOwner.toLowerCase() === currentSession.email.toLowerCase()) || null;
+    }
+    return null;
+  });
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [bypassLanding, setBypassLanding] = useState(false);
   const [authInitialTab, setAuthInitialTab] = useState<'login' | 'register'>('login');
@@ -329,6 +336,7 @@ export default function App() {
           atelieName={atelie?.nome}
           isOpenMobile={mobileMenuOpen}
           onCloseMobile={() => setMobileMenuOpen(false)}
+          syncMode={localDb.getStorageMode()}
         />
 
         {/* Core application canvas panels */}
@@ -511,6 +519,7 @@ export default function App() {
                 ) : (
                   <>
                     {/* Standard Tailor Workstations Workspace */}
+                    <Route path="/admin" element={<Navigate to="/dashboard" replace />} />
                     <Route path="/dashboard" element={atelie && <DashboardView atelie={atelie} />} />
                     <Route
                       path="/clientes"
@@ -750,12 +759,14 @@ function AuthScreen({ onLoginSuccess, initialTab = 'login', onBackToLanding, ini
 
   const [email, setEmail] = useState('');
   const [senha, setSenha] = useState('');
+  const [showLoginSenha, setShowLoginSenha] = useState(false);
   const [errorMess, setErrorMess] = useState('');
 
   // Admin First Access Password Setup State
   const [adminFirstSetup, setAdminFirstSetup] = useState<{ email: string } | null>(null);
   const [adminFirstSenha, setAdminFirstSenha] = useState('');
   const [adminFirstSenhaConfirm, setAdminFirstSenhaConfirm] = useState('');
+  const [showAdminFirstSenha, setShowAdminFirstSenha] = useState(false);
   const [isSettingAdminPassword, setIsSettingAdminPassword] = useState(false);
 
   // Register Fields
@@ -770,30 +781,135 @@ function AuthScreen({ onLoginSuccess, initialTab = 'login', onBackToLanding, ini
 
   const [regEmail, setRegEmail] = useState('');
   const [regSenha, setRegSenha] = useState('');
+  const [showRegSenha, setShowRegSenha] = useState(false);
   const [regPlano, setRegPlano] = useState<'basico' | 'pro'>('basico');
+
+  const [googlePromptOpen, setGooglePromptOpen] = useState(false);
+  const [googlePromptEmail, setGooglePromptEmail] = useState('');
+  const [isLoggingInGoogle, setIsLoggingInGoogle] = useState(false);
+
+  // Google Auth Account Setup State (Required after Google login)
+  const [googlePasswordSetup, setGooglePasswordSetup] = useState<{
+    email: string;
+    isAdmin: boolean;
+    displayName?: string;
+  } | null>(null);
+  const [googleAtelieNome, setGoogleAtelieNome] = useState('');
+  const [googleNomeDono, setGoogleNomeDono] = useState('');
+  const [googleTelefone, setGoogleTelefone] = useState('244');
+  const [googlePlano, setGooglePlano] = useState<'basico' | 'pro'>('basico');
+  const [googleNewPassword, setGoogleNewPassword] = useState('');
+  const [googleConfirmPassword, setGoogleConfirmPassword] = useState('');
+  const [showGooglePassword, setShowGooglePassword] = useState(false);
+  const [isSavingGooglePassword, setIsSavingGooglePassword] = useState(false);
+
+  const performGoogleLogin = async (targetEmail: string) => {
+    const mailLower = targetEmail.trim().toLowerCase();
+    if (!mailLower || !mailLower.includes('@')) {
+      setErrorMess('Por favor, informe um endereço de e-mail do Google válido.');
+      return;
+    }
+    setErrorMess('');
+    setIsLoggingInGoogle(true);
+    try {
+      const adminList = localDb.getAdmins().map(a => a.toLowerCase().trim());
+      const isAdmin = adminList.includes(mailLower);
+
+      const ddi = PAISES_CONFIG[regPais]?.codigoDDI || '244';
+      const existingAtelie = localDb.getAtelies().find(a => a.emailOwner.toLowerCase() === mailLower);
+
+      setGooglePromptOpen(false);
+      setGooglePasswordSetup({
+        email: mailLower,
+        isAdmin,
+        displayName: mailLower.split('@')[0],
+      });
+
+      if (!isAdmin) {
+        const defaultOwner = mailLower.split('@')[0].replace(/[._-]/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+        setGoogleAtelieNome(existingAtelie?.nome || regAtelieNome || `Ateliê ${defaultOwner}`);
+        setGoogleNomeDono(regNomeDono || defaultOwner);
+        setGoogleTelefone(existingAtelie?.telefone || (regTelefone.length > 3 ? regTelefone : ddi));
+        setGooglePlano((existingAtelie?.plano as 'basico' | 'pro') || regPlano || 'basico');
+      }
+
+      setGoogleNewPassword('');
+      setGoogleConfirmPassword('');
+      setShowGooglePassword(false);
+    } catch (err: any) {
+      console.error('Google Auth Error:', err);
+      setErrorMess(err.message || 'Erro de autenticação com o Google.');
+      toast.error('Erro de autenticação: ' + (err.message || err));
+    } finally {
+      setIsLoggingInGoogle(false);
+    }
+  };
+
+  const handleGooglePasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMess('');
+
+    if (!googlePasswordSetup?.email) return;
+
+    if (!googlePasswordSetup.isAdmin) {
+      if (!googleAtelieNome.trim()) {
+        setErrorMess('Por favor, informe o Nome do seu Ateliê.');
+        return;
+      }
+      if (!googleNomeDono.trim()) {
+        setErrorMess('Por favor, informe o Nome do Costureiro(a) / Dono(a).');
+        return;
+      }
+      if (!googleTelefone.trim()) {
+        setErrorMess('Por favor, informe o Telefone / WhatsApp de contacto.');
+        return;
+      }
+    }
+
+    if (!googleNewPassword || googleNewPassword.length < 6) {
+      setErrorMess('A palavra-passe deve ter pelo menos 6 caracteres.');
+      return;
+    }
+
+    if (googleNewPassword !== googleConfirmPassword) {
+      setErrorMess('As palavras-passe não coincidem. Por favor, confirme novamente.');
+      return;
+    }
+
+    setIsSavingGooglePassword(true);
+    try {
+      const sess = await customAuth.setupUserPassword({
+        email: googlePasswordSetup.email,
+        password: googleNewPassword,
+        nomeAtelie: googleAtelieNome.trim(),
+        nomeDono: googleNomeDono.trim(),
+        telefone: googleTelefone.trim(),
+        plano: googlePlano,
+      });
+
+      if (sess.isAdmin) {
+        toast.success('🛡️ Palavra-passe configurada! Autenticado como Administrador Central.');
+      } else {
+        toast.success('✨ Conta criada e configurada com sucesso! Bem-vindo ao FlowTailor.');
+      }
+
+      setGooglePasswordSetup(null);
+      onLoginSuccess();
+    } catch (err: any) {
+      console.error('Google password setup error:', err);
+      setErrorMess(err.message || 'Erro ao gravar a palavra-passe e conta.');
+    } finally {
+      setIsSavingGooglePassword(false);
+    }
+  };
 
   const openGoogleAuth = async () => {
     setErrorMess('');
-    try {
-      const sess = await customAuth.loginWithGoogle();
-      if (sess) {
-        toast.success('Autenticado com o Google com sucesso!');
-        onLoginSuccess();
-      }
-    } catch (err: any) {
-      if (
-        err?.code === 'auth/cancelled-popup-request' ||
-        err?.code === 'auth/popup-closed-by-user' ||
-        err?.message?.includes('popup-closed-by-user') ||
-        err?.message?.includes('fechada antes de concluir')
-      ) {
-        toast.info('Autenticação do Google cancelada.');
-      } else if (err?.code === 'auth/popup-blocked' || err?.message?.includes('bloqueado')) {
-        toast.error('O popup de login foi bloqueado. Por favor, permita popups neste navegador ou abra a app noutra aba.');
-      } else {
-        console.error('Google Auth Error:', err);
-        toast.error('Erro de autenticação com o Google: ' + (err.message || err));
-      }
+    if (email.trim() && email.includes('@')) {
+      await performGoogleLogin(email.trim());
+    } else {
+      setGooglePromptEmail('');
+      setGooglePromptOpen(true);
     }
   };
 
@@ -918,8 +1034,331 @@ function AuthScreen({ onLoginSuccess, initialTab = 'login', onBackToLanding, ini
 
       <div className="w-full max-w-md bg-white rounded-3xl border border-atelier-200/80 shadow-2xl shadow-atelier-950/5 overflow-hidden transition-all">
         
-        {/* If Admin First Setup is Active */}
-        {adminFirstSetup ? (
+        {/* If Google Auth Prompt is Active */}
+        {googlePromptOpen ? (
+          <div className="p-6 sm:p-8 space-y-5">
+            <div className="text-center space-y-1.5 pb-2 border-b border-atelier-100">
+              <div className="inline-flex p-3 bg-blue-50 text-blue-600 rounded-2xl mb-1 shadow-xs">
+                <svg className="w-7 h-7" viewBox="0 0 24 24">
+                  <path
+                    fill="#EA4335"
+                    d="M5.266 9.765A7.077 7.077 0 0112 4.909c1.69 0 3.218.6 4.418 1.582L19.91 3C17.782 1.145 15.055 0 12 0 7.33 0 3.313 2.682 1.34 6.582l3.926 3.183z"
+                  />
+                  <path
+                    fill="#4285F4"
+                    d="M16.04 15.345c-1.07.727-2.437 1.164-4.04 1.164a7.077 7.077 0 01-6.734-4.855L1.34 14.836A12 12 0 0012 24c3.245 0 6.19-1.09 8.41-2.945l-4.37-3.71z"
+                  />
+                  <path
+                    fill="#34A853"
+                    d="M11.999 16.51c-.13 0-.255-.01-.382-.01l4.418 3.755A12.017 12.017 0 0024 12c0-.727-.068-1.427-.182-2.11L12 10v4.51c1.8 0 3.23.864 3.755 2.01l.245-.01z"
+                  />
+                  <path
+                    fill="#FBBC05"
+                    d="M1.34 6.582a12.001 12.001 0 000 10.836l3.926-3.183c-.227-.682-.34-1.4-.34-2.235 0-.837.113-1.555.34-2.236L1.34 6.582z"
+                  />
+                </svg>
+              </div>
+              <h2 className="text-xl font-bold font-display text-slate-900">
+                Entrar com a Conta Google
+              </h2>
+              <p className="text-xs text-slate-500 max-w-xs mx-auto">
+                Autenticação rápida e segura via Google OAuth
+              </p>
+            </div>
+
+            {errorMess && (
+              <div className="p-3 bg-red-50 border border-red-200 text-xs font-semibold text-red-700 rounded-xl leading-normal flex items-start gap-2">
+                <AlertTriangle className="w-4.5 h-4.5 text-red-600 shrink-0" />
+                <span>{errorMess}</span>
+              </div>
+            )}
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                performGoogleLogin(googlePromptEmail);
+              }}
+              className="space-y-4"
+            >
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-slate-700 flex items-center gap-1">
+                  <Mail className="w-3.5 h-3.5 text-slate-500" /> Seu E-mail Google
+                </label>
+                <input
+                  type="email"
+                  required
+                  placeholder="seu.email@exemplo.com"
+                  autoFocus
+                  className="w-full px-3.5 py-2.5 text-sm border border-slate-200 rounded-xl bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+                  value={googlePromptEmail}
+                  onChange={(e) => setGooglePromptEmail(e.target.value)}
+                />
+              </div>
+
+              <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl text-[11px] text-slate-600 leading-relaxed">
+                🔒 <strong>Segurança do Sistema:</strong> O perfil de Administrador ou Proprietário de Ateliê é atribuído e validado automaticamente conforme as credenciais autorizadas.
+              </div>
+
+              <div className="pt-2 space-y-2">
+                <button
+                  type="submit"
+                  disabled={isLoggingInGoogle || !googlePromptEmail.trim()}
+                  className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm rounded-xl transition-all shadow-md shadow-blue-600/20 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  {isLoggingInGoogle ? 'A autenticar no Google...' : 'Continuar e Iniciar Sessão'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGooglePromptOpen(false);
+                    setGooglePromptEmail('');
+                    setErrorMess('');
+                  }}
+                  className="w-full py-2.5 text-xs font-bold text-slate-500 hover:text-slate-800 transition-all text-center cursor-pointer"
+                >
+                  Cancelar e Voltar
+                </button>
+              </div>
+            </form>
+          </div>
+        ) : googlePasswordSetup ? (
+          <div className="p-6 sm:p-8 space-y-5">
+            <div className="text-center space-y-1.5 pb-2 border-b border-atelier-100">
+              <div className="inline-flex p-3 bg-atelier-50 text-atelier-700 rounded-2xl mb-1 shadow-xs">
+                {googlePasswordSetup.isAdmin ? (
+                  <ShieldCheck className="w-7 h-7 text-amber-600" />
+                ) : (
+                  <Scissors className="w-7 h-7 text-atelier-700" />
+                )}
+              </div>
+              <h2 className="text-xl font-bold font-display text-slate-900">
+                {googlePasswordSetup.isAdmin ? 'Configurar Senha de Administrador' : 'Concluir Cadastro do seu Ateliê'}
+              </h2>
+              <div className="flex items-center justify-center gap-1.5 flex-wrap pt-1">
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200">
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24">
+                    <path fill="#EA4335" d="M5.266 9.765A7.077 7.077 0 0112 4.909c1.69 0 3.218.6 4.418 1.582L19.91 3C17.782 1.145 15.055 0 12 0 7.33 0 3.313 2.682 1.34 6.582l3.926 3.183z"/>
+                    <path fill="#4285F4" d="M16.04 15.345c-1.07.727-2.437 1.164-4.04 1.164a7.077 7.077 0 01-6.734-4.855L1.34 14.836A12 12 0 0012 24c3.245 0 6.19-1.09 8.41-2.945l-4.37-3.71z"/>
+                    <path fill="#34A853" d="M11.999 16.51c-.13 0-.255-.01-.382-.01l4.418 3.755A12.017 12.017 0 0024 12c0-.727-.068-1.427-.182-2.11L12 10v4.51c1.8 0 3.23.864 3.755 2.01l.245-.01z"/>
+                    <path fill="#FBBC05" d="M1.34 6.582a12.001 12.001 0 000 10.836l3.926-3.183c-.227-.682-.34-1.4-.34-2.235 0-.837.113-1.555.34-2.236L1.34 6.582z"/>
+                  </svg>
+                  {googlePasswordSetup.email}
+                </span>
+                {googlePasswordSetup.isAdmin ? (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                    🛡️ Admin Central
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                    ✂️ Nova Conta Ateliê
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div className="p-3.5 bg-blue-50/70 border border-blue-200/80 rounded-2xl flex items-start gap-2.5">
+              <Sparkles className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
+              <p className="text-xs text-blue-900 leading-relaxed font-medium">
+                {googlePasswordSetup.isAdmin
+                  ? 'Autenticação Google concluída com sucesso! Para sua segurança, defina a sua palavra-passe mestre de Administrador.'
+                  : 'Autenticação Google concluída! Preencha os dados do seu ateliê e crie a sua palavra-passe para concluir a abertura da conta.'}
+              </p>
+            </div>
+
+            {errorMess && (
+              <div className="p-3 bg-red-50 border border-red-200 text-xs font-semibold text-red-700 rounded-xl leading-normal flex items-start gap-2">
+                <AlertTriangle className="w-4.5 h-4.5 text-red-600 shrink-0" />
+                <span>{errorMess}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleGooglePasswordSubmit} className="space-y-4 max-h-[440px] overflow-y-auto pr-1">
+              {!googlePasswordSetup.isAdmin && (
+                <>
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-600 flex items-center gap-1">
+                      <Scissors className="w-3.5 h-3.5" /> Nome do seu Ateliê *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="Ex: Ateliê Ramos Alfaiataria"
+                      className="w-full px-3.5 py-2 text-sm border border-gray-200 rounded-xl bg-slate-50 focus:outline-none focus:bg-white focus:ring-2 focus:ring-atelier-500/20 focus:border-atelier-500"
+                      value={googleAtelieNome}
+                      onChange={(e) => setGoogleAtelieNome(e.target.value)}
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-600 flex items-center gap-1">
+                      <User className="w-3.5 h-3.5" /> Nome do Costureiro(a) Dono(a) *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="Ex: Rosa Ramos"
+                      className="w-full px-3.5 py-2 text-sm border border-gray-200 rounded-xl bg-slate-50 focus:outline-none focus:bg-white focus:ring-2 focus:ring-atelier-500/20 focus:border-atelier-500"
+                      value={googleNomeDono}
+                      onChange={(e) => setGoogleNomeDono(e.target.value)}
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-600 flex items-center gap-1">
+                      <Phone className="w-3.5 h-3.5" /> Telefone / WhatsApp *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="Ex: 244923000000"
+                      className="w-full px-3.5 py-2 text-sm border border-gray-200 rounded-xl bg-slate-50 focus:outline-none font-mono focus:bg-white focus:ring-2 focus:ring-atelier-500/20 focus:border-atelier-500"
+                      value={googleTelefone}
+                      onChange={(e) => setGoogleTelefone(e.target.value)}
+                    />
+                  </div>
+                </>
+              )}
+
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-slate-700 flex items-center justify-between">
+                  <span className="flex items-center gap-1">
+                    <Lock className="w-3.5 h-3.5 text-slate-500" /> Palavra-passe de Acesso *
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setShowGooglePassword(!showGooglePassword)}
+                    className="text-[11px] text-slate-500 hover:text-slate-800 flex items-center gap-1 font-medium cursor-pointer"
+                  >
+                    {showGooglePassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    {showGooglePassword ? 'Ocultar' : 'Mostrar'}
+                  </button>
+                </label>
+                <input
+                  type={showGooglePassword ? 'text' : 'password'}
+                  required
+                  minLength={6}
+                  placeholder="Crie de pelo menos 6 caracteres"
+                  className="w-full px-3.5 py-2.5 text-sm border border-slate-200 rounded-xl bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-atelier-500/20 focus:border-atelier-500"
+                  value={googleNewPassword}
+                  onChange={(e) => setGoogleNewPassword(e.target.value)}
+                />
+                {googleNewPassword.length > 0 && (
+                  <div className="pt-1 flex items-center gap-1.5">
+                    <div className="flex-1 h-1 rounded-full bg-slate-200 overflow-hidden">
+                      <div
+                        className={`h-full transition-all ${
+                          googleNewPassword.length < 6
+                            ? 'w-1/4 bg-red-500'
+                            : googleNewPassword.length < 8
+                            ? 'w-2/4 bg-amber-500'
+                            : 'w-full bg-emerald-500'
+                        }`}
+                      />
+                    </div>
+                    <span className="text-[10px] font-bold text-slate-500">
+                      {googleNewPassword.length < 6
+                        ? 'Fraca (mín. 6)'
+                        : googleNewPassword.length < 8
+                        ? 'Média'
+                        : 'Forte'}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-slate-700 flex items-center gap-1">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-slate-500" /> Confirmar Palavra-passe *
+                </label>
+                <input
+                  type={showGooglePassword ? 'text' : 'password'}
+                  required
+                  minLength={6}
+                  placeholder="Digite a mesma palavra-passe"
+                  className="w-full px-3.5 py-2.5 text-sm border border-slate-200 rounded-xl bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-atelier-500/20 focus:border-atelier-500"
+                  value={googleConfirmPassword}
+                  onChange={(e) => setGoogleConfirmPassword(e.target.value)}
+                />
+                {googleConfirmPassword.length > 0 && (
+                  <div className="pt-0.5">
+                    {googleNewPassword === googleConfirmPassword ? (
+                      <span className="text-[11px] font-semibold text-emerald-600 flex items-center gap-1">
+                        <Check className="w-3.5 h-3.5" /> As palavras-passe coincidem
+                      </span>
+                    ) : (
+                      <span className="text-[11px] font-semibold text-red-500">
+                        As palavras-passe não coincidem
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {!googlePasswordSetup.isAdmin && (
+                <div className="space-y-1.5 pt-1.5">
+                  <label className="text-xs font-bold text-slate-650 flex items-center gap-1">
+                    <CreditCard className="w-3.5 h-3.5" /> Selecione o Plano Desejado
+                  </label>
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <div
+                      onClick={() => setGooglePlano('basico')}
+                      className={`p-3.5 rounded-2xl border text-left cursor-pointer transition-all ${
+                        googlePlano === 'basico'
+                          ? 'border-atelier-600 bg-atelier-50/40 shadow-sm'
+                          : 'border-slate-200 bg-white hover:bg-slate-50'
+                      }`}
+                    >
+                      <strong className="text-xs block text-slate-900">Básico (Estúdio)</strong>
+                      <span className="text-[11px] text-slate-500 block">
+                        {formatarMoedaSimples(PAISES_CONFIG[regPais].basicPrice, regPais)} / mês
+                      </span>
+                    </div>
+
+                    <div
+                      onClick={() => setGooglePlano('pro')}
+                      className={`p-3.5 rounded-2xl border text-left cursor-pointer transition-all ${
+                        googlePlano === 'pro'
+                          ? 'border-atelier-600 bg-atelier-50/40 shadow-sm'
+                          : 'border-slate-200 bg-white hover:bg-slate-50'
+                      }`}
+                    >
+                      <strong className="text-xs block text-slate-900">Pro (Ilimitado)</strong>
+                      <span className="text-[11px] text-slate-550 block font-bold text-atelier-700">
+                        {formatarMoedaSimples(PAISES_CONFIG[regPais].proPrice, regPais)} / mês
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="pt-2 space-y-2">
+                <button
+                  type="submit"
+                  disabled={isSavingGooglePassword || googleNewPassword.length < 6}
+                  className="w-full py-3 bg-atelier-700 hover:bg-atelier-850 text-white font-bold text-sm rounded-xl transition-all shadow-md shadow-atelier-750/15 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  <ShieldCheck className="w-4 h-4" />
+                  {isSavingGooglePassword ? 'A registar ateliê...' : 'Concluir Registo e Aceder ao Ateliê'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGooglePasswordSetup(null);
+                    setGoogleNewPassword('');
+                    setGoogleConfirmPassword('');
+                    setErrorMess('');
+                  }}
+                  className="w-full py-2.5 text-xs font-bold text-slate-500 hover:text-slate-800 transition-all text-center cursor-pointer"
+                >
+                  Cancelar e Voltar
+                </button>
+              </div>
+            </form>
+          </div>
+        ) : adminFirstSetup ? (
           <div className="p-6 sm:p-8 space-y-5">
             <div className="text-center space-y-1.5 pb-2 border-b border-atelier-100">
               <div className="inline-flex p-3 bg-amber-500/10 text-amber-600 rounded-2xl mb-1">
@@ -949,11 +1388,21 @@ function AuthScreen({ onLoginSuccess, initialTab = 'login', onBackToLanding, ini
 
             <form onSubmit={handleAdminFirstPasswordSubmit} className="space-y-4">
               <div className="space-y-1">
-                <label className="text-xs font-bold text-slate-700 flex items-center gap-1">
-                  <Lock className="w-3.5 h-3.5 text-slate-500" /> Nova Palavra-passe de Administrador
+                <label className="text-xs font-bold text-slate-700 flex items-center justify-between">
+                  <span className="flex items-center gap-1">
+                    <Lock className="w-3.5 h-3.5 text-slate-500" /> Nova Palavra-passe de Administrador
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setShowAdminFirstSenha(!showAdminFirstSenha)}
+                    className="text-[11px] text-slate-500 hover:text-slate-800 flex items-center gap-1 font-medium cursor-pointer"
+                  >
+                    {showAdminFirstSenha ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    {showAdminFirstSenha ? 'Ocultar' : 'Mostrar'}
+                  </button>
                 </label>
                 <input
-                  type="password"
+                  type={showAdminFirstSenha ? 'text' : 'password'}
                   required
                   minLength={6}
                   placeholder="Mínimo 6 caracteres"
@@ -968,7 +1417,7 @@ function AuthScreen({ onLoginSuccess, initialTab = 'login', onBackToLanding, ini
                   <CheckCircle2 className="w-3.5 h-3.5 text-slate-500" /> Confirmar Palavra-passe
                 </label>
                 <input
-                  type="password"
+                  type={showAdminFirstSenha ? 'text' : 'password'}
                   required
                   minLength={6}
                   placeholder="Digite a mesma palavra-passe"
@@ -1061,12 +1510,22 @@ function AuthScreen({ onLoginSuccess, initialTab = 'login', onBackToLanding, ini
               </div>
 
               <div className="space-y-1">
-                <label className="text-xs font-bold text-slate-600 flex items-center gap-1"><Lock className="w-3.5 h-3.5" /> Palavra-passe</label>
+                <label className="text-xs font-bold text-slate-600 flex items-center justify-between">
+                  <span className="flex items-center gap-1"><Lock className="w-3.5 h-3.5" /> Palavra-passe</span>
+                  <button
+                    type="button"
+                    onClick={() => setShowLoginSenha(!showLoginSenha)}
+                    className="text-[11px] text-slate-500 hover:text-slate-800 flex items-center gap-1 font-medium cursor-pointer"
+                  >
+                    {showLoginSenha ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    {showLoginSenha ? 'Ocultar' : 'Mostrar'}
+                  </button>
+                </label>
                 <input
-                  type="password"
+                  type={showLoginSenha ? 'text' : 'password'}
                   required
                   placeholder="Introduza a sua senha"
-                  className="w-full px-3.5 py-2 text-sm border border-gray-200 rounded-xl bg-slate-50 focus:outline-none"
+                  className="w-full px-3.5 py-2 text-sm border border-gray-200 rounded-xl bg-slate-50 focus:outline-none focus:bg-white focus:ring-2 focus:ring-atelier-500/20 focus:border-atelier-500"
                   value={senha}
                   onChange={(e) => setSenha(e.target.value)}
                 />
@@ -1158,7 +1617,7 @@ function AuthScreen({ onLoginSuccess, initialTab = 'login', onBackToLanding, ini
                 <input
                   type="email"
                   required
-                  placeholder="Ex: rosa.ramos@gmail.com"
+                  placeholder="Ex: contacto@seuatelie.ao"
                   className="w-full px-3.5 py-2 text-sm border border-gray-200 rounded-xl bg-slate-50 focus:outline-none"
                   value={regEmail}
                   onChange={(e) => setRegEmail(e.target.value)}
@@ -1166,12 +1625,23 @@ function AuthScreen({ onLoginSuccess, initialTab = 'login', onBackToLanding, ini
               </div>
 
               <div className="space-y-1">
-                <label className="text-xs font-bold text-slate-600 flex items-center gap-1"><Lock className="w-3.5 h-3.5" /> Palavra-passe de Acesso *</label>
+                <label className="text-xs font-bold text-slate-600 flex items-center justify-between">
+                  <span className="flex items-center gap-1"><Lock className="w-3.5 h-3.5" /> Palavra-passe de Acesso *</span>
+                  <button
+                    type="button"
+                    onClick={() => setShowRegSenha(!showRegSenha)}
+                    className="text-[11px] text-slate-500 hover:text-slate-800 flex items-center gap-1 font-medium cursor-pointer"
+                  >
+                    {showRegSenha ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    {showRegSenha ? 'Ocultar' : 'Mostrar'}
+                  </button>
+                </label>
                 <input
-                  type="password"
+                  type={showRegSenha ? 'text' : 'password'}
                   required
+                  minLength={6}
                   placeholder="Crie de pelo menos 6 caracteres"
-                  className="w-full px-3.5 py-2 text-sm border border-gray-200 rounded-xl bg-slate-50 focus:outline-none font-sans"
+                  className="w-full px-3.5 py-2 text-sm border border-gray-200 rounded-xl bg-slate-50 focus:outline-none focus:bg-white focus:ring-2 focus:ring-atelier-500/20 focus:border-atelier-500 font-sans"
                   value={regSenha}
                   onChange={(e) => setRegSenha(e.target.value)}
                 />
@@ -1600,6 +2070,12 @@ function ConfiguracoesView({ atelie, onRefresh, onNewAlertTriggered }: Configura
     }
     setSyncMode(mode);
     localStorage.setItem('flowtailor_sync_mode', mode);
+    localDb.setStorageMode(mode === 'offline_local' ? 'offline' : 'hybrid');
+    if (mode === 'offline_local') {
+      toast.success('Modo 100% Offline ativado: dados guardados estritamente no armazenamento local (IndexedDB).');
+    } else {
+      toast.success('Sistema Híbrido ativado: sincronização automática com a nuvem em tempo real.');
+    }
   };
 
   // Manual Trigger: Persist all recent data directly to Neon PostgreSQL API

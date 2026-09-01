@@ -1,5 +1,6 @@
 import { neon } from '@neondatabase/serverless';
 import { drizzle, NeonHttpDatabase } from 'drizzle-orm/neon-http';
+import { eq } from 'drizzle-orm';
 import * as schema from './schema.js';
 import { env } from '../config/env.js';
 
@@ -182,8 +183,6 @@ export async function ensureTablesExist(): Promise<{ success: boolean; error?: s
     // Inserção de Administradores Iniciais
     await sql`
       INSERT INTO admins (email) VALUES 
-        ('edvaniothomas925@gmail.com'),
-        ('admin@ateliepro.com'),
         ('admin@flowtailor.ao')
       ON CONFLICT (email) DO NOTHING
     `;
@@ -206,6 +205,41 @@ export async function ensureTablesExist(): Promise<{ success: boolean; error?: s
   } catch (err: any) {
     console.error('Erro ao verificar/criar tabelas no Neon:', err);
     return { success: false, error: err?.message || String(err) };
+  }
+}
+
+/**
+ * Whitelist de administradores autorizados padrão (Root Admins)
+ */
+export const INITIAL_AUTHORIZED_ADMINS: readonly string[] = [
+  'admin@flowtailor.ao',
+];
+
+/**
+ * Validação rigorosa e segura de email de administrador no Neon PostgreSQL
+ */
+export async function isAuthorizedAdminEmail(email?: string | null): Promise<boolean> {
+  if (!email || typeof email !== 'string') return false;
+  const mailLower = email.toLowerCase().trim();
+  if (!mailLower || !mailLower.includes('@')) return false;
+
+  // 1. Verificação rápida contra os Root Admins
+  if (INITIAL_AUTHORIZED_ADMINS.includes(mailLower)) {
+    return true;
+  }
+
+  // 2. Consulta à tabela de administradores no Neon PostgreSQL
+  try {
+    const db = getDb();
+    const rows = await db
+      .select({ email: schema.admins.email })
+      .from(schema.admins)
+      .where(eq(schema.admins.email, mailLower));
+    
+    return rows.length > 0;
+  } catch (err) {
+    console.warn('[Admin Verification Neon DB Warning - fallback to static whitelist]:', err);
+    return INITIAL_AUTHORIZED_ADMINS.includes(mailLower);
   }
 }
 

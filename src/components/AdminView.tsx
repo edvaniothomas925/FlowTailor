@@ -4,7 +4,8 @@ import { Atelie, SolicitacaoPagamento, ConfiguracaoPagamento } from '../types';
 import { 
   Shield, Sparkles, AlertCircle, CheckCircle2, XCircle, Users, Smartphone, 
   BookOpen, Key, Trash, CreditCard, Save, BarChart3, Plus, X, BarChart, 
-  Calendar, Award, ArrowUpRight, TrendingUp, HelpCircle, RefreshCw, Cloud
+  Calendar, Award, ArrowUpRight, TrendingUp, HelpCircle, RefreshCw, Cloud,
+  Lock, Eye, EyeOff
 } from 'lucide-react';
 import { toast, confirmDialog } from '../lib/toast';
 
@@ -41,6 +42,7 @@ export default function AdminView({ onRefreshAtelieSession }: AdminViewProps) {
   // Add Admin form
   const [novoAdminEmail, setNovoAdminEmail] = useState('');
   const [novoAdminSenha, setNovoAdminSenha] = useState('');
+  const [showNovoAdminSenha, setShowNovoAdminSenha] = useState(false);
   const [adminCreds, setAdminCreds] = useState<Record<string, { passwordHash: string; passwordSetAt?: string }>>({});
 
   // Sync state
@@ -605,7 +607,7 @@ export default function AdminView({ onRefreshAtelieSession }: AdminViewProps) {
                     <input
                       type="email"
                       required
-                      placeholder="Ex: costureira@gmail.com"
+                      placeholder="Ex: proprietario@atelie.ao"
                       className="w-full p-2.5 text-xs border rounded-xl bg-slate-50 focus:outline-none focus:ring-1 focus:ring-atelier-500 text-slate-900 font-mono"
                       value={novoAtelieEmail}
                       onChange={(e) => setNovoAtelieEmail(e.target.value)}
@@ -977,11 +979,23 @@ export default function AdminView({ onRefreshAtelieSession }: AdminViewProps) {
 
               <div className="space-y-1">
                 <label className="block text-xs font-bold text-slate-700 flex items-center justify-between">
-                  <span>Palavra-passe Inicial (Opcional)</span>
-                  <span className="text-[10px] text-slate-400 font-normal">Min. 6 caracteres</span>
+                  <span className="flex items-center gap-1"><Lock className="w-3.5 h-3.5 text-slate-500" /> Palavra-passe Inicial (Opcional)</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-slate-400 font-normal">Min. 6 caracteres</span>
+                    {novoAdminSenha.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setShowNovoAdminSenha(!showNovoAdminSenha)}
+                        className="text-[11px] text-slate-500 hover:text-slate-800 flex items-center gap-1 font-medium cursor-pointer"
+                      >
+                        {showNovoAdminSenha ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                        {showNovoAdminSenha ? 'Ocultar' : 'Mostrar'}
+                      </button>
+                    )}
+                  </div>
                 </label>
                 <input
-                  type="password"
+                  type={showNovoAdminSenha ? 'text' : 'password'}
                   minLength={6}
                   placeholder="Deixar em branco para definir no 1º acesso"
                   className="w-full p-2.5 border rounded-xl text-xs bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-slate-900/10"

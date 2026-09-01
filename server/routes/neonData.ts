@@ -48,7 +48,7 @@ const handleSetupTables = async (_req: Request, res: Response) => {
   if (result.success) {
     res.status(200).json({ 
       success: true, 
-      message: 'Tabelas relacionais (atelies, clientes, encomendas, medidas, solicitacoes_pagamento, configuracoes, admins) criadas/validadas com sucesso no Neon PostgreSQL com o admin inicial edvaniothomas925@gmail.com configurado.' 
+      message: 'Tabelas relacionais (atelies, clientes, encomendas, medidas, solicitacoes_pagamento, configuracoes, admins) criadas/validadas com sucesso no Neon PostgreSQL.' 
     });
   } else {
     res.status(500).json({ success: false, error: "Erro ao inicializar tabelas no banco de dados." });
@@ -753,7 +753,7 @@ router.post('/neon/configuracoes', checkDbAvailable, async (req: Request, res: R
  * Listar administradores
  */
 router.get('/neon/admins', checkDbAvailable, async (req: Request, res: Response) => {
-  const initialAdmins = ['edvaniothomas925@gmail.com', 'admin@ateliepro.com', 'admin@flowtailor.ao'];
+  const initialAdmins = ['admin@flowtailor.ao'];
   try {
     await ensureAdminColumnsExist();
     const db = getDb();
@@ -800,7 +800,7 @@ router.get('/neon/admins/status/:email', checkDbAvailable, async (req: Request, 
   try {
     await ensureAdminColumnsExist();
     const email = decodeURIComponent(req.params.email).toLowerCase().trim();
-    const initialAdmins = ['edvaniothomas925@gmail.com', 'admin@ateliepro.com', 'admin@flowtailor.ao'];
+    const initialAdmins = ['admin@flowtailor.ao'];
     const db = getDb();
     
     let result: any[] = [];
@@ -830,7 +830,7 @@ router.get('/neon/admins/status/:email', checkDbAvailable, async (req: Request, 
   } catch (err: any) {
     console.error('[Neon] Erro ao consultar status admin:', err);
     const email = decodeURIComponent(req.params.email || '').toLowerCase().trim();
-    const initialAdmins = ['edvaniothomas925@gmail.com', 'admin@ateliepro.com', 'admin@flowtailor.ao'];
+    const initialAdmins = ['admin@flowtailor.ao'];
     res.json({
       isAdmin: initialAdmins.includes(email),
       exists: initialAdmins.includes(email),
@@ -941,7 +941,7 @@ router.post('/neon/admins/verify-password', checkDbAvailable, async (req: Reques
       result = await db.select().from(admins).where(eq(admins.email, email));
     }
 
-    const initialAdmins = ['edvaniothomas925@gmail.com', 'admin@ateliepro.com', 'admin@flowtailor.ao'];
+    const initialAdmins = ['admin@flowtailor.ao'];
     const isAdmin = initialAdmins.includes(email) || result.length > 0;
 
     if (!isAdmin) {

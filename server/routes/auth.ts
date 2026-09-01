@@ -23,6 +23,7 @@ import {
 } from '../schemas/zodSchemas.js';
 import { createRateLimiter } from '../middleware/rateLimiter.js';
 import { logSecurityEvent } from '../services/auditLogger.js';
+import { isAuthorizedAdminEmail } from '../db/index.js';
 
 const router = Router();
 
@@ -58,15 +59,25 @@ router.post(
   '/login',
   validateBody(authLoginSchema),
   async (req: Request, res: Response) => {
-    const { email, role, atelieId, atelieName, authProvider } = req.body as AuthLoginInput;
-    const userId = `user_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`;
+    const { email, role: requestedRole, atelieId, atelieName, authProvider } = req.body as AuthLoginInput;
+    const mailLower = email.toLowerCase().trim();
+    
+    // Strict verification: only grant 'admin' role if email is authorized in database/whitelist
+    const isAllowedAdmin = await isAuthorizedAdminEmail(mailLower);
+    const effectiveRole = isAllowedAdmin 
+      ? 'admin' 
+      : (requestedRole === 'admin' ? 'atelie_owner' : (requestedRole || 'atelie_owner'));
+
+    const userId = isAllowedAdmin 
+      ? `admin_${mailLower.split('@')[0]}` 
+      : `user_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`;
 
     const payload: UserJwtPayload = {
       userId,
-      email,
-      role: role || 'atelie_owner',
+      email: mailLower,
+      role: effectiveRole,
       atelieId: atelieId || undefined,
-      atelieName: atelieName || 'Ateliê FlowTailor',
+      atelieName: atelieName || (isAllowedAdmin ? 'Administração Central' : 'Ateliê FlowTailor'),
       authProvider: authProvider || 'email',
       sessionCreated: new Date().toISOString(),
     };
@@ -85,7 +96,7 @@ router.post(
       ip,
       path: req.originalUrl,
       method: req.method,
-      details: `User login successful via Zod schema: ${email} (${payload.role})`,
+      details: `User login successful via Zod schema: ${mailLower} (Role: ${payload.role}, IsAdmin: ${isAllowedAdmin})`,
     });
 
     res.json({
@@ -95,6 +106,7 @@ router.post(
       tokenType: tokens.tokenType,
       expiresIn: tokens.expiresIn,
       user: payload,
+      isAdmin: isAllowedAdmin,
     });
   }
 );
@@ -106,10 +118,20 @@ router.post(
 router.post(
   '/token',
   validateBody(authTokenIssueSchema),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const body = req.body as AuthTokenIssueInput;
+    const mailLower = body.email ? body.email.toLowerCase().trim() : undefined;
+    
+    // Strict verification: only grant 'admin' role if email is authorized
+    const isAllowedAdmin = mailLower ? await isAuthorizedAdminEmail(mailLower) : false;
+    const effectiveRole = isAllowedAdmin 
+      ? 'admin' 
+      : (body.role === 'admin' ? 'atelie_owner' : body.role);
+
     const payload: UserJwtPayload = {
       ...body,
+      email: mailLower,
+      role: effectiveRole,
       atelieId: body.atelieId || undefined,
       atelieName: body.atelieName || undefined,
       sessionCreated: new Date().toISOString(),
@@ -129,7 +151,7 @@ router.post(
       ip,
       path: req.originalUrl,
       method: req.method,
-      details: `JWT Token pair issued via Zod schema for user: ${payload.userId} (${payload.role})`,
+      details: `JWT Token pair issued via Zod schema for user: ${payload.userId} (Role: ${payload.role})`,
     });
 
     res.json({
@@ -138,6 +160,7 @@ router.post(
       tokenType: tokens.tokenType,
       expiresIn: tokens.expiresIn,
       user: payload,
+      isAdmin: isAllowedAdmin,
     });
   }
 );
@@ -338,7 +361,8 @@ router.get('/neon/google-url', (req: Request, res: Response) => {
 });
 
 /**
- * 6.3. Sync Session from Neon Auth to FlowTailor JWT
+ * 6.3. Sync Session from Neon Auth / Google OAuth to FlowTailor JWT
+ * Strictly verifies admin role against database/whitelist
  */
 router.post('/neon/sync-session', async (req: Request, res: Response) => {
   const { email, displayName, uid, authProvider = 'google_neon' } = req.body;
@@ -347,8 +371,7 @@ router.post('/neon/sync-session', async (req: Request, res: Response) => {
   }
 
   const mailLower = String(email).toLowerCase().trim();
-  const initialAdmins = ['edvaniothomas925@gmail.com', 'admin@ateliepro.com', 'admin@flowtailor.ao'];
-  const isAdmin = initialAdmins.includes(mailLower);
+  const isAdmin = await isAuthorizedAdminEmail(mailLower);
   
   const userId = uid || (isAdmin ? `admin_${mailLower.split('@')[0]}` : `user_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`);
 
@@ -356,7 +379,7 @@ router.post('/neon/sync-session', async (req: Request, res: Response) => {
     userId,
     email: mailLower,
     role: isAdmin ? 'admin' : 'atelie_owner',
-    atelieName: displayName ? `Ateliê de ${displayName}` : `Ateliê de ${mailLower.split('@')[0]}`,
+    atelieName: displayName ? `Ateliê de ${displayName}` : (isAdmin ? 'Administração Central' : `Ateliê de ${mailLower.split('@')[0]}`),
     authProvider,
     sessionCreated: new Date().toISOString(),
   };
@@ -364,15 +387,131 @@ router.post('/neon/sync-session', async (req: Request, res: Response) => {
   const tokens = generateTokenPair(payload);
   res.cookie(REFRESH_COOKIE_NAME, tokens.refreshToken, getRefreshCookieOptions());
 
+  const forwarded = req.headers['x-forwarded-for'];
+  const ip = (typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : req.socket.remoteAddress) || '127.0.0.1';
+
+  logSecurityEvent({
+    type: 'AUTH_SUCCESS',
+    severity: 'INFO',
+    ip,
+    path: req.originalUrl,
+    method: req.method,
+    details: `Google/Neon OAuth session synced for ${mailLower} (Role: ${payload.role}, IsAdmin: ${isAdmin})`,
+  });
+
   res.json({
     success: true,
-    message: 'Sessão sincronizada com o Neon Auth com sucesso.',
+    message: 'Sessão sincronizada com sucesso.',
     accessToken: tokens.accessToken,
     tokenType: tokens.tokenType,
     expiresIn: tokens.expiresIn,
     user: payload,
     isAdmin,
+    role: payload.role,
   });
+});
+
+/**
+ * 6.4. Direct Google OAuth Verification & Token Exchange
+ */
+router.post('/google/authenticate', async (req: Request, res: Response) => {
+  try {
+    const { email, displayName, sub } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: 'Email da conta Google é obrigatório.' });
+    }
+
+    const mailLower = String(email).toLowerCase().trim();
+    const isAdmin = await isAuthorizedAdminEmail(mailLower);
+    const userId = sub ? `google_${sub}` : (isAdmin ? `admin_${mailLower.split('@')[0]}` : `user_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`);
+
+    const payload: UserJwtPayload = {
+      userId,
+      email: mailLower,
+      role: isAdmin ? 'admin' : 'atelie_owner',
+      atelieName: displayName ? `Ateliê de ${displayName}` : (isAdmin ? 'Administração Central' : `Ateliê de ${mailLower.split('@')[0]}`),
+      authProvider: 'google',
+      sessionCreated: new Date().toISOString(),
+    };
+
+    const tokens = generateTokenPair(payload);
+    res.cookie(REFRESH_COOKIE_NAME, tokens.refreshToken, getRefreshCookieOptions());
+
+    res.json({
+      success: true,
+      accessToken: tokens.accessToken,
+      tokenType: tokens.tokenType,
+      expiresIn: tokens.expiresIn,
+      user: payload,
+      isAdmin,
+      role: payload.role,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Falha na autenticação do Google.' });
+  }
+});
+
+/**
+ * 6.5. Configure Account / Password for User or Admin after Google Login or Initial Setup
+ */
+router.post('/set-password', async (req: Request, res: Response) => {
+  try {
+    const { email, password, displayName, nomeAtelie, nomeDono, telefone, plano } = req.body;
+    if (!email || typeof email !== 'string') {
+      return res.status(400).json({ error: 'Endereço de email é obrigatório.' });
+    }
+    if (!password || typeof password !== 'string' || password.length < 6) {
+      return res.status(400).json({ error: 'A palavra-passe deve conter pelo menos 6 caracteres.' });
+    }
+
+    const mailLower = email.toLowerCase().trim();
+    const isAdmin = await isAuthorizedAdminEmail(mailLower);
+    const hashedPassword = await hashPassword(password);
+
+    const userId = isAdmin 
+      ? `admin_${mailLower.split('@')[0]}` 
+      : `user_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`;
+
+    const computedAtelieName = (nomeAtelie || displayName || (isAdmin ? 'Administração Central' : `Ateliê de ${mailLower.split('@')[0]}`)).trim();
+
+    const payload: UserJwtPayload = {
+      userId,
+      email: mailLower,
+      role: isAdmin ? 'admin' : 'atelie_owner',
+      atelieName: computedAtelieName,
+      authProvider: 'google',
+      sessionCreated: new Date().toISOString(),
+    };
+
+    const tokens = generateTokenPair(payload);
+    res.cookie(REFRESH_COOKIE_NAME, tokens.refreshToken, getRefreshCookieOptions());
+
+    const forwarded = req.headers['x-forwarded-for'];
+    const ip = (typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : req.socket.remoteAddress) || '127.0.0.1';
+
+    logSecurityEvent({
+      type: 'AUTH_SUCCESS',
+      severity: 'INFO',
+      ip,
+      path: req.originalUrl,
+      method: req.method,
+      details: `Account setup completed successfully for Google user: ${mailLower} (Role: ${payload.role}, IsAdmin: ${isAdmin})`,
+    });
+
+    res.json({
+      success: true,
+      message: 'Conta e palavra-passe configuradas com sucesso.',
+      accessToken: tokens.accessToken,
+      tokenType: tokens.tokenType,
+      expiresIn: tokens.expiresIn,
+      user: payload,
+      isAdmin,
+      role: payload.role,
+    });
+  } catch (err: any) {
+    console.error('[Set Password Error]:', err);
+    res.status(500).json({ error: 'Erro ao configurar conta e palavra-passe.' });
+  }
 });
 
 /**

@@ -9,9 +9,10 @@ interface SidebarProps {
   atelieName?: string;
   isOpenMobile?: boolean;
   onCloseMobile?: () => void;
+  syncMode?: 'hybrid' | 'offline' | 'offline_local';
 }
 
-export default function Sidebar({ onLogout, isAdmin, atelieName, isOpenMobile, onCloseMobile }: SidebarProps) {
+export default function Sidebar({ onLogout, isAdmin, atelieName, isOpenMobile, onCloseMobile, syncMode }: SidebarProps) {
   const location = useLocation();
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
   const [isStandalone, setIsStandalone] = useState(false);
@@ -19,6 +20,16 @@ export default function Sidebar({ onLogout, isAdmin, atelieName, isOpenMobile, o
   const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
   const [isSyncing, setIsSyncing] = useState(false);
   const [lastSync, setLastSync] = useState<string | null>(null);
+  const [storageMode, setStorageMode] = useState<'hybrid' | 'offline'>(() => {
+    if (syncMode) return (syncMode === 'offline' || syncMode === 'offline_local') ? 'offline' : 'hybrid';
+    return localDb.getStorageMode();
+  });
+
+  useEffect(() => {
+    if (syncMode) {
+      setStorageMode((syncMode === 'offline' || syncMode === 'offline_local') ? 'offline' : 'hybrid');
+    }
+  }, [syncMode]);
 
   useEffect(() => {
     const unsubNet = localDb.onNetworkChange((online) => setIsOnline(online));
@@ -26,10 +37,22 @@ export default function Sidebar({ onLogout, isAdmin, atelieName, isOpenMobile, o
       setIsSyncing(syncing);
       setLastSync(last);
     });
+    const unsubStorage = localDb.onStorageModeChange((mode) => {
+      setStorageMode(mode);
+    });
+
+    const handleCustomStorageChange = (e: any) => {
+      if (e.detail?.mode) {
+        setStorageMode(e.detail.mode);
+      }
+    };
+    window.addEventListener('flowtailor_storage_mode_change', handleCustomStorageChange);
 
     return () => {
       unsubNet();
       unsubSync();
+      unsubStorage();
+      window.removeEventListener('flowtailor_storage_mode_change', handleCustomStorageChange);
     };
   }, []);
 
@@ -216,48 +239,64 @@ export default function Sidebar({ onLogout, isAdmin, atelieName, isOpenMobile, o
         )}
 
         <div className={`p-3 border rounded-xl text-[11px] space-y-1.5 mb-4 select-none transition-colors ${
-          !isOnline 
-            ? 'bg-amber-50/70 border-amber-200/70 text-amber-800'
-            : isSyncing 
-              ? 'bg-blue-50/70 border-blue-200/70 text-blue-800'
-              : 'bg-slate-50 border-slate-200/60 text-slate-500'
+          storageMode === 'offline'
+            ? 'bg-amber-50/80 border-amber-300/80 text-amber-900'
+            : !isOnline 
+              ? 'bg-amber-50/70 border-amber-200/70 text-amber-800'
+              : isSyncing 
+                ? 'bg-blue-50/70 border-blue-200/70 text-blue-800'
+                : 'bg-slate-50 border-slate-200/60 text-slate-500'
         }`}>
           <div className="flex items-center justify-between font-bold">
-            <span className="uppercase text-[9px] tracking-wider text-slate-500 flex items-center gap-1">
-              {!isOnline ? (
+            <span className="uppercase text-[9px] tracking-wider flex items-center gap-1.5">
+              {storageMode === 'offline' ? (
                 <>
-                  <CloudOff className="w-3 h-3 text-amber-600" />
-                  <span>Modo Offline</span>
+                  <CloudOff className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                  <span className="text-amber-900 font-bold">MODO 100% OFFLINE</span>
+                </>
+              ) : !isOnline ? (
+                <>
+                  <CloudOff className="w-3 h-3 text-amber-600 shrink-0" />
+                  <span className="text-slate-600">Modo Offline</span>
                 </>
               ) : isSyncing ? (
                 <>
-                  <RefreshCw className="w-3 h-3 text-blue-600 animate-spin" />
-                  <span>A Sincronizar...</span>
+                  <RefreshCw className="w-3 h-3 text-blue-600 animate-spin shrink-0" />
+                  <span className="text-blue-700">A Sincronizar...</span>
                 </>
               ) : (
                 <>
-                  <Cloud className="w-3 h-3 text-emerald-600" />
-                  <span>Sistema Híbrido</span>
+                  <Cloud className="w-3 h-3 text-emerald-600 shrink-0" />
+                  <span className="text-slate-600">Sistema Híbrido</span>
                 </>
               )}
             </span>
-            <span className={`flex items-center gap-1 text-[10px] ${
-              !isOnline ? 'text-amber-700' : isSyncing ? 'text-blue-700' : 'text-emerald-600'
-            }`}>
-              <span className={`w-1.5 h-1.5 rounded-full inline-block ${
-                !isOnline ? 'bg-amber-500' : isSyncing ? 'bg-blue-500 animate-ping' : 'bg-emerald-500 animate-pulse'
-              }`}></span> 
-              {!isOnline ? 'Local' : isSyncing ? 'Nuvem...' : 'Online & Nuvem'}
-            </span>
+            {storageMode === 'offline' ? (
+              <span className="flex items-center gap-1.5 text-[10px] font-bold text-amber-800 bg-amber-200/70 px-2 py-0.5 rounded-full border border-amber-300 shadow-xs">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                Estritamente Local
+              </span>
+            ) : (
+              <span className={`flex items-center gap-1 text-[10px] font-semibold ${
+                !isOnline ? 'text-amber-700' : isSyncing ? 'text-blue-700' : 'text-emerald-600'
+              }`}>
+                <span className={`w-1.5 h-1.5 rounded-full inline-block ${
+                  !isOnline ? 'bg-amber-500' : isSyncing ? 'bg-blue-500 animate-ping' : 'bg-emerald-500 animate-pulse'
+                }`}></span> 
+                {!isOnline ? 'Local' : isSyncing ? 'Nuvem...' : 'Online & Nuvem'}
+              </span>
+            )}
           </div>
-          <p className="text-[10px] text-slate-400 leading-snug">
-            {!isOnline 
-              ? 'Guardado em cache local no aparelho. Será enviado assim que tiver internet.'
-              : isSyncing 
-                ? 'A gravar alterações no Neon PostgreSQL...'
-                : 'Sincronização automática ativa sempre que houver internet.'}
+          <p className="text-[10px] leading-snug">
+            {storageMode === 'offline'
+              ? 'Guardado estritamente no armazenamento local (IndexedDB). Zero consumo de dados e total privacidade.'
+              : !isOnline 
+                ? 'Guardado em cache local no aparelho. Será enviado assim que tiver internet.'
+                : isSyncing 
+                  ? 'A gravar alterações no Neon PostgreSQL...'
+                  : 'Sincronização automática ativa sempre que houver internet.'}
           </p>
-          {lastSync && (
+          {lastSync && storageMode !== 'offline' && (
             <div className="text-[9px] text-slate-400 flex items-center justify-between pt-0.5 border-t border-slate-200/40">
               <span>Última sincro:</span>
               <span className="font-mono text-[9px] text-slate-500">{lastSync.split(',')[1] || lastSync}</span>

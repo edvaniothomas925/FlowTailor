@@ -28,12 +28,35 @@ async function ensureAdminColumnsExist() {
   }
 }
 
+// Sanitization Helpers for Neon DB
+function sanitizeNumeric(val: any, fallback = '0'): string {
+  if (val === null || val === undefined || val === '') return fallback;
+  const cleaned = String(val).replace(/[^0-9.-]+/g, '');
+  const num = Number(cleaned);
+  return isNaN(num) ? fallback : String(num);
+}
+
+function sanitizeNullableNumeric(val: any): string | null {
+  if (val === null || val === undefined || val === '') return null;
+  const cleaned = String(val).replace(/[^0-9.-]+/g, '');
+  const num = Number(cleaned);
+  return isNaN(num) ? null : String(num);
+}
+
+function sanitizeDate(val: any): Date | null {
+  if (!val) return null;
+  const d = new Date(val);
+  return isNaN(d.getTime()) ? null : d;
+}
+
 // Middleware helper to ensure Database connection is available
 function checkDbAvailable(req: Request, res: Response, next: () => void) {
   const url = getDatabaseUrl();
   if (!url) {
     return res.status(503).json({
-      error: 'Base de dados Neon PostgreSQL não configurada. Defina DATABASE_URL no seu ambiente.',
+      success: false,
+      message: 'Falha ao sincronizar dados do ateliê',
+      details: 'Base de dados Neon PostgreSQL não configurada. Defina DATABASE_URL no seu ambiente.',
       neonConnected: false,
     });
   }
@@ -1014,277 +1037,442 @@ router.delete('/neon/admins/:email', checkDbAvailable, async (req: Request, res:
 // ==============================================================================
 // 8. BATCH SYNC: Sincronização em massa de Ateliê + Clientes + Encomendas + Medidas
 // ==============================================================================
-router.post('/neon/sync-atelie', checkDbAvailable, async (req: Request, res: Response) => {
+router.post(['/neon/sync-atelie', '/sync-atelie'], checkDbAvailable, async (req: Request, res: Response) => {
   try {
-    const { atelie, clientes: clientesList = [], encomendas: encomendasList = [], pedidos: pedidosList = [], medidas: medidasList = [] } = req.body;
-    if (!atelie || !atelie.id) {
-      return res.status(400).json({ error: 'Dados do ateliê são obrigatórios.' });
+    // 0. Ensure tables exist before running SQL queries
+    await ensureTablesExist().catch((tableErr) => {
+      console.warn('[Neon sync-atelie] AutoMigration notice:', tableErr);
+    });
+
+    const { 
+      atelie, 
+      clientes: clientesList = [], 
+      encomendas: encomendasList = [], 
+      pedidos: pedidosList = [], 
+      medidas: medidasList = [] 
+    } = req.body || {};
+
+    if (!atelie || typeof atelie !== 'object' || !atelie.id) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Falha ao sincronizar dados do ateliê', 
+        details: 'Dados do ateliê ou ID do ateliê são obrigatórios no payload.' 
+      });
     }
 
     const db = getDb();
-    const atelieId = atelie.id;
-    const finalEncomendas = encomendasList.length > 0 ? encomendasList : pedidosList;
+    const atelieId = String(atelie.id).trim();
+    if (!atelieId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Falha ao sincronizar dados do ateliê', 
+        details: 'ID do ateliê não pode ser vazio.' 
+      });
+    }
+
+    const atelieNome = (atelie.nome && String(atelie.nome).trim()) || 'Ateliê';
+    const atelieEmail = (atelie.emailOwner || atelie.email || `${atelieId}@flowtailor.local`).toLowerCase().trim();
+    const atelieTelefone = atelie.telefone ? String(atelie.telefone).trim() : null;
+    const ateliePlano = atelie.plano || 'basico';
+    const atelieAtivo = atelie.ativo !== undefined ? Boolean(atelie.ativo) : true;
+    const atelieVencimento = sanitizeDate(atelie.dataVencimento);
+
+    const finalEncomendas = Array.isArray(encomendasList) && encomendasList.length > 0 
+      ? encomendasList 
+      : (Array.isArray(pedidosList) ? pedidosList : []);
 
     // 1. Upsert ateliê
     await db
       .insert(atelies)
       .values({
         id: atelieId,
-        nome: atelie.nome || 'Ateliê sem nome',
-        email: atelie.emailOwner || atelie.email || `${atelieId}@ateliepro.local`,
-        telefone: atelie.telefone || null,
-        plano: atelie.plano || 'basico',
-        ativo: atelie.ativo !== undefined ? Boolean(atelie.ativo) : true,
-        data_vencimento: atelie.dataVencimento ? new Date(atelie.dataVencimento) : null,
+        nome: atelieNome,
+        email: atelieEmail,
+        telefone: atelieTelefone,
+        plano: ateliePlano,
+        ativo: atelieAtivo,
+        data_vencimento: atelieVencimento,
       })
       .onConflictDoUpdate({
         target: atelies.id,
         set: {
-          nome: atelie.nome || 'Ateliê sem nome',
-          email: atelie.emailOwner || atelie.email || `${atelieId}@ateliepro.local`,
-          telefone: atelie.telefone || null,
-          plano: atelie.plano || 'basico',
-          ativo: atelie.ativo !== undefined ? Boolean(atelie.ativo) : true,
-          data_vencimento: atelie.dataVencimento ? new Date(atelie.dataVencimento) : null,
+          nome: atelieNome,
+          email: atelieEmail,
+          telefone: atelieTelefone,
+          plano: ateliePlano,
+          ativo: atelieAtivo,
+          data_vencimento: atelieVencimento,
         },
       });
 
-    // 2. Upsert clientes
-    for (const c of clientesList) {
-      if (c.id && c.nome) {
-        await db
-          .insert(clientes)
-          .values({
-            id: c.id,
-            atelie_id: atelieId,
-            nome: c.nome,
-            telefone: c.telefone || null,
-            email: c.email || null,
-            observacoes: c.observacoes || null,
-            medidas: c.medidas || {},
-          })
-          .onConflictDoUpdate({
-            target: clientes.id,
-            set: {
-              nome: c.nome,
-              telefone: c.telefone || null,
-              email: c.email || null,
-              observacoes: c.observacoes || null,
-              medidas: c.medidas || {},
-            },
-          });
+    // 2. Upsert clientes (and track valid IDs for foreign key integrity)
+    const validClientIds = new Set<string>();
+    if (Array.isArray(clientesList)) {
+      for (const c of clientesList) {
+        if (!c || !c.id) continue;
+        const cId = String(c.id).trim();
+        if (!cId) continue;
+        validClientIds.add(cId);
+
+        const cNome = (c.nome && String(c.nome).trim()) || 'Cliente';
+        const cTelefone = c.telefone ? String(c.telefone).trim() : null;
+        const cEmail = c.email ? String(c.email).trim().toLowerCase() : null;
+        const cObs = c.observacoes ? String(c.observacoes).trim() : null;
+        const cMedidas = (typeof c.medidas === 'object' && c.medidas !== null) ? c.medidas : {};
+
+        try {
+          await db
+            .insert(clientes)
+            .values({
+              id: cId,
+              atelie_id: atelieId,
+              nome: cNome,
+              telefone: cTelefone,
+              email: cEmail,
+              observacoes: cObs,
+              medidas: cMedidas,
+            })
+            .onConflictDoUpdate({
+              target: clientes.id,
+              set: {
+                nome: cNome,
+                telefone: cTelefone,
+                email: cEmail,
+                observacoes: cObs,
+                medidas: cMedidas,
+              },
+            });
+        } catch (clientErr) {
+          console.warn(`[Neon sync-atelie] Aviso ao sincronizar cliente ${cId}:`, clientErr);
+        }
       }
     }
 
-    // 3. Upsert encomendas
-    for (const e of finalEncomendas) {
-      if (e.id && (e.descricaoPeca || e.descricao)) {
-        await db
-          .insert(encomendas)
-          .values({
-            id: e.id,
-            atelie_id: atelieId,
-            cliente_id: e.clienteId || e.cliente_id || null,
-            cliente_nome: e.clienteNome || e.cliente_nome || null,
-            cliente_telefone: e.clienteTelefone || e.cliente_telefone || null,
-            descricao: e.descricaoPeca || e.descricao || 'Encomenda',
-            tipo_peca: e.tipoPeca || e.tipo_peca || 'vestido',
-            tecido: e.tecido || null,
-            valor_kz: e.valor != null ? String(e.valor) : (e.precoKz != null ? String(e.precoKz) : (e.valor_kz != null ? String(e.valor_kz) : '0')),
-            sinal_pago: e.sinalPago != null ? String(e.sinalPago) : (e.sinal_pago != null ? String(e.sinal_pago) : '0'),
-            estado: e.status || e.estado || 'em_andamento',
-            prazo_entrega: e.prazoEntrega || e.dataEntrega || e.prazo_entrega ? new Date(e.prazoEntrega || e.dataEntrega || e.prazo_entrega) : null,
-            foto_referencia: e.fotoReferencia || e.foto_referencia || null,
-            observacoes: e.observacoes || null,
-          })
-          .onConflictDoUpdate({
-            target: encomendas.id,
-            set: {
-              cliente_id: e.clienteId || e.cliente_id || null,
-              cliente_nome: e.clienteNome || e.cliente_nome || null,
-              cliente_telefone: e.clienteTelefone || e.cliente_telefone || null,
-              descricao: e.descricaoPeca || e.descricao || 'Encomenda',
-              tipo_peca: e.tipoPeca || e.tipo_peca || 'vestido',
-              tecido: e.tecido || null,
-              valor_kz: e.valor != null ? String(e.valor) : (e.precoKz != null ? String(e.precoKz) : (e.valor_kz != null ? String(e.valor_kz) : '0')),
-              sinal_pago: e.sinalPago != null ? String(e.sinalPago) : (e.sinal_pago != null ? String(e.sinal_pago) : '0'),
-              estado: e.status || e.estado || 'em_andamento',
-              prazo_entrega: e.prazoEntrega || e.dataEntrega || e.prazo_entrega ? new Date(e.prazoEntrega || e.dataEntrega || e.prazo_entrega) : null,
-              foto_referencia: e.fotoReferencia || e.foto_referencia || null,
-              observacoes: e.observacoes || null,
-            },
-          });
+    // 3. Upsert encomendas / pedidos
+    if (Array.isArray(finalEncomendas)) {
+      for (const e of finalEncomendas) {
+        if (!e || !e.id) continue;
+        const eId = String(e.id).trim();
+        if (!eId) continue;
+
+        const rawClientId = e.clienteId || e.cliente_id;
+        const cId = rawClientId ? String(rawClientId).trim() : null;
+        // Only reference cliente_id if it exists in validClientIds
+        const safeClienteId = cId && validClientIds.has(cId) ? cId : null;
+
+        const eDesc = (e.descricaoPeca || e.descricao || 'Encomenda').trim();
+        const eTipo = (e.tipoPeca || e.tipo_peca || 'vestido').trim();
+        const eTecido = e.tecido ? String(e.tecido).trim() : null;
+        const eValor = sanitizeNumeric(e.valor ?? e.precoKz ?? e.valor_kz, '0');
+        const eSinal = sanitizeNumeric(e.sinalPago ?? e.sinal_pago, '0');
+        const eEstado = (e.status || e.estado || 'em_andamento').trim();
+        const ePrazo = sanitizeDate(e.prazoEntrega || e.dataEntrega || e.prazo_entrega);
+        const eFoto = e.fotoReferencia || e.foto_referencia || null;
+        const eObs = e.observacoes ? String(e.observacoes).trim() : null;
+        const eClienteNome = e.clienteNome || e.cliente_nome || null;
+        const eClienteTelefone = e.clienteTelefone || e.cliente_telefone || null;
+
+        try {
+          await db
+            .insert(encomendas)
+            .values({
+              id: eId,
+              atelie_id: atelieId,
+              cliente_id: safeClienteId,
+              cliente_nome: eClienteNome,
+              cliente_telefone: eClienteTelefone,
+              descricao: eDesc,
+              tipo_peca: eTipo,
+              tecido: eTecido,
+              valor_kz: eValor,
+              sinal_pago: eSinal,
+              estado: eEstado,
+              prazo_entrega: ePrazo,
+              foto_referencia: eFoto,
+              observacoes: eObs,
+            })
+            .onConflictDoUpdate({
+              target: encomendas.id,
+              set: {
+                cliente_id: safeClienteId,
+                cliente_nome: eClienteNome,
+                cliente_telefone: eClienteTelefone,
+                descricao: eDesc,
+                tipo_peca: eTipo,
+                tecido: eTecido,
+                valor_kz: eValor,
+                sinal_pago: eSinal,
+                estado: eEstado,
+                prazo_entrega: ePrazo,
+                foto_referencia: eFoto,
+                observacoes: eObs,
+              },
+            });
+        } catch (encErr) {
+          console.warn(`[Neon sync-atelie] Aviso ao sincronizar encomenda ${eId}:`, encErr);
+        }
       }
     }
 
     // 4. Upsert medidas
-    for (const m of medidasList) {
-      if (m.id && m.clienteId) {
-        await db
-          .insert(medidas)
-          .values({
-            id: m.id,
-            atelie_id: atelieId,
-            cliente_id: m.clienteId,
-            busto: m.busto != null ? String(m.busto) : null,
-            cintura: m.cintura != null ? String(m.cintura) : null,
-            quadril: m.quadril != null ? String(m.quadril) : null,
-            ombro: m.ombro != null ? String(m.ombro) : null,
-            comprimento_tronco: m.comprimentoTronco != null ? String(m.comprimentoTronco) : null,
-            comprimento_saia: m.comprimentoSaia != null ? String(m.comprimentoSaia) : null,
-            comprimento_calca: m.comprimentoCalca != null ? String(m.comprimentoCalca) : null,
-            manga: m.manga != null ? String(m.manga) : null,
-            observacoes: m.observacoes || null,
-            registrado_em: m.registradoEm ? new Date(m.registradoEm) : new Date(),
-          })
-          .onConflictDoUpdate({
-            target: medidas.id,
-            set: {
-              busto: m.busto != null ? String(m.busto) : null,
-              cintura: m.cintura != null ? String(m.cintura) : null,
-              quadril: m.quadril != null ? String(m.quadril) : null,
-              ombro: m.ombro != null ? String(m.ombro) : null,
-              comprimento_tronco: m.comprimentoTronco != null ? String(m.comprimentoTronco) : null,
-              comprimento_saia: m.comprimentoSaia != null ? String(m.comprimentoSaia) : null,
-              comprimento_calca: m.comprimentoCalca != null ? String(m.comprimentoCalca) : null,
-              manga: m.manga != null ? String(m.manga) : null,
-              observacoes: m.observacoes || null,
-            },
-          });
+    if (Array.isArray(medidasList)) {
+      for (const m of medidasList) {
+        if (!m || !m.id || !m.clienteId) continue;
+        const mId = String(m.id).trim();
+        const mClienteId = String(m.clienteId).trim();
+        if (!mId || !mClienteId) continue;
+
+        // Ensure the referenced client exists to prevent foreign key violation
+        if (!validClientIds.has(mClienteId)) {
+          try {
+            await db
+              .insert(clientes)
+              .values({
+                id: mClienteId,
+                atelie_id: atelieId,
+                nome: 'Cliente',
+              })
+              .onConflictDoNothing();
+            validClientIds.add(mClienteId);
+          } catch (createClientErr) {
+            console.warn(`[Neon sync-atelie] Falha ao criar cliente referenciado por medida:`, createClientErr);
+          }
+        }
+
+        const mBusto = sanitizeNullableNumeric(m.busto);
+        const mCintura = sanitizeNullableNumeric(m.cintura);
+        const mQuadril = sanitizeNullableNumeric(m.quadril);
+        const mOmbro = sanitizeNullableNumeric(m.ombro);
+        const mComprimentoTronco = sanitizeNullableNumeric(m.comprimentoTronco ?? m.comprimento_tronco);
+        const mComprimentoSaia = sanitizeNullableNumeric(m.comprimentoSaia ?? m.comprimento_saia);
+        const mComprimentoCalca = sanitizeNullableNumeric(m.comprimentoCalca ?? m.comprimento_calca);
+        const mManga = sanitizeNullableNumeric(m.manga);
+        const mObs = m.observacoes ? String(m.observacoes).trim() : null;
+        const mReg = sanitizeDate(m.registradoEm || m.registrado_em) || new Date();
+
+        try {
+          await db
+            .insert(medidas)
+            .values({
+              id: mId,
+              atelie_id: atelieId,
+              cliente_id: mClienteId,
+              busto: mBusto,
+              cintura: mCintura,
+              quadril: mQuadril,
+              ombro: mOmbro,
+              comprimento_tronco: mComprimentoTronco,
+              comprimento_saia: mComprimentoSaia,
+              comprimento_calca: mComprimentoCalca,
+              manga: mManga,
+              observacoes: mObs,
+              registrado_em: mReg,
+            })
+            .onConflictDoUpdate({
+              target: medidas.id,
+              set: {
+                busto: mBusto,
+                cintura: mCintura,
+                quadril: mQuadril,
+                ombro: mOmbro,
+                comprimento_tronco: mComprimentoTronco,
+                comprimento_saia: mComprimentoSaia,
+                comprimento_calca: mComprimentoCalca,
+                manga: mManga,
+                observacoes: mObs,
+              },
+            });
+        } catch (medErr) {
+          console.warn(`[Neon sync-atelie] Aviso ao sincronizar medida ${mId}:`, medErr);
+        }
       }
     }
 
-    res.json({
+    return res.status(200).json({
       success: true,
+      message: 'Dados do ateliê sincronizados com sucesso.',
       synced: {
         atelieId,
-        clientesCount: clientesList.length,
+        clientesCount: Array.isArray(clientesList) ? clientesList.length : 0,
         encomendasCount: finalEncomendas.length,
-        medidasCount: medidasList.length,
+        medidasCount: Array.isArray(medidasList) ? medidasList.length : 0,
       },
     });
   } catch (err: any) {
-    console.error('[Neon] Erro no batch sync:', err);
-    res.status(500).json({ error: "Erro interno ao processar operação no banco de dados." });
+    console.error('Sync error:', err);
+    return res.status(500).json({
+      success: false,
+      message: "Falha ao sincronizar dados do ateliê",
+      details: err?.message || String(err),
+    });
   }
 });
 
 // ==============================================================================
 // 9. BATCH SYNC ADMIN: Sincronização em massa de dados de Administração
 // ==============================================================================
-router.post('/neon/sync-admin', checkDbAvailable, async (req: Request, res: Response) => {
+router.post(['/neon/sync-admin', '/sync-admin'], checkDbAvailable, async (req: Request, res: Response) => {
   try {
-    const { atelies: ateliesList = [], solicitacoes: solList = [], configs, admins: adminList = [] } = req.body;
+    await ensureTablesExist().catch((tableErr) => {
+      console.warn('[Neon sync-admin] AutoMigration notice:', tableErr);
+    });
+
+    const { atelies: ateliesList = [], solicitacoes: solList = [], configs, admins: adminList = [] } = req.body || {};
     const db = getDb();
     let count = 0;
 
     // 1. Sync Atelies
-    for (const a of ateliesList) {
-      if (a.id && a.nome) {
-        await db
-          .insert(atelies)
-          .values({
-            id: a.id,
-            nome: a.nome,
-            email: a.emailOwner || a.email || `${a.id}@ateliepro.local`,
-            telefone: a.telefone || null,
-            plano: a.plano || 'basico',
-            ativo: a.ativo !== undefined ? Boolean(a.ativo) : true,
-            data_vencimento: a.dataVencimento ? new Date(a.dataVencimento) : null,
-          })
-          .onConflictDoUpdate({
-            target: atelies.id,
-            set: {
-              nome: a.nome,
-              email: a.emailOwner || a.email || `${a.id}@ateliepro.local`,
-              telefone: a.telefone || null,
-              plano: a.plano || 'basico',
-              ativo: a.ativo !== undefined ? Boolean(a.ativo) : true,
-              data_vencimento: a.dataVencimento ? new Date(a.dataVencimento) : null,
-            },
-          });
-        count++;
+    if (Array.isArray(ateliesList)) {
+      for (const a of ateliesList) {
+        if (!a || !a.id) continue;
+        const aId = String(a.id).trim();
+        const aNome = (a.nome && String(a.nome).trim()) || 'Ateliê';
+        const aEmail = (a.emailOwner || a.email || `${aId}@flowtailor.local`).toLowerCase().trim();
+        const aTelefone = a.telefone ? String(a.telefone).trim() : null;
+        const aPlano = a.plano || 'basico';
+        const aAtivo = a.ativo !== undefined ? Boolean(a.ativo) : true;
+        const aVencimento = sanitizeDate(a.dataVencimento);
+
+        try {
+          await db
+            .insert(atelies)
+            .values({
+              id: aId,
+              nome: aNome,
+              email: aEmail,
+              telefone: aTelefone,
+              plano: aPlano,
+              ativo: aAtivo,
+              data_vencimento: aVencimento,
+            })
+            .onConflictDoUpdate({
+              target: atelies.id,
+              set: {
+                nome: aNome,
+                email: aEmail,
+                telefone: aTelefone,
+                plano: aPlano,
+                ativo: aAtivo,
+                data_vencimento: aVencimento,
+              },
+            });
+          count++;
+        } catch (errA) {
+          console.warn(`[Neon sync-admin] Erro ao sincronizar ateliê ${aId}:`, errA);
+        }
       }
     }
 
     // 2. Sync Solicitacoes
-    for (const s of solList) {
-      if (s.id && s.atelieId) {
-        await db
-          .insert(solicitacoesPagamento)
-          .values({
-            id: s.id,
-            atelie_id: s.atelieId,
-            atelie_nome: s.atelieNome || 'Ateliê',
-            email_owner: s.emailOwner || `${s.atelieId}@ateliepro.local`,
-            telefone_owner: s.telefoneOwner || null,
-            plano: s.plano || 'basico',
-            metodo_pagamento: s.metodoPagamento || 'multicaixa',
-            comprovativo_url: s.comprovativoUrl || null,
-            status: s.status || 'pendente',
-            observacoes_admin: s.observacoesAdmin || null,
-            solicitado_em: s.solicitadoEm ? new Date(s.solicitadoEm) : new Date(),
-            resolvido_em: s.resolvidoEm ? new Date(s.resolvidoEm) : null,
-          })
-          .onConflictDoUpdate({
-            target: solicitacoesPagamento.id,
-            set: {
-              atelie_nome: s.atelieNome || 'Ateliê',
-              email_owner: s.emailOwner || `${s.atelieId}@ateliepro.local`,
-              telefone_owner: s.telefoneOwner || null,
-              plano: s.plano || 'basico',
-              metodo_pagamento: s.metodoPagamento || 'multicaixa',
-              comprovativo_url: s.comprovativoUrl || null,
-              status: s.status || 'pendente',
-              observacoes_admin: s.observacoesAdmin || null,
-              resolvido_em: s.resolvidoEm ? new Date(s.resolvidoEm) : null,
-            },
-          });
-        count++;
+    if (Array.isArray(solList)) {
+      for (const s of solList) {
+        if (!s || !s.id || !s.atelieId) continue;
+        const sId = String(s.id).trim();
+        const sAtelieId = String(s.atelieId).trim();
+        const sAtelieNome = (s.atelieNome && String(s.atelieNome).trim()) || 'Ateliê';
+        const sEmail = (s.emailOwner || `${sAtelieId}@flowtailor.local`).toLowerCase().trim();
+        const sTelefone = s.telefoneOwner ? String(s.telefoneOwner).trim() : null;
+        const sPlano = s.plano || 'basico';
+        const sMetodo = s.metodoPagamento || 'multicaixa';
+        const sComprovativo = s.comprovativoUrl || null;
+        const sStatus = s.status || 'pendente';
+        const sObs = s.observacoesAdmin ? String(s.observacoesAdmin).trim() : null;
+        const sSolEm = sanitizeDate(s.solicitadoEm) || new Date();
+        const sResEm = sanitizeDate(s.resolvidoEm);
+
+        try {
+          await db
+            .insert(solicitacoesPagamento)
+            .values({
+              id: sId,
+              atelie_id: sAtelieId,
+              atelie_nome: sAtelieNome,
+              email_owner: sEmail,
+              telefone_owner: sTelefone,
+              plano: sPlano,
+              metodo_pagamento: sMetodo,
+              comprovativo_url: sComprovativo,
+              status: sStatus,
+              observacoes_admin: sObs,
+              solicitado_em: sSolEm,
+              resolvido_em: sResEm,
+            })
+            .onConflictDoUpdate({
+              target: solicitacoesPagamento.id,
+              set: {
+                atelie_nome: sAtelieNome,
+                email_owner: sEmail,
+                telefone_owner: sTelefone,
+                plano: sPlano,
+                metodo_pagamento: sMetodo,
+                comprovativo_url: sComprovativo,
+                status: sStatus,
+                observacoes_admin: sObs,
+                resolvido_em: sResEm,
+              },
+            });
+          count++;
+        } catch (errS) {
+          console.warn(`[Neon sync-admin] Erro ao sincronizar solicitação ${sId}:`, errS);
+        }
       }
     }
 
     // 3. Sync Configs
-    if (configs) {
-      await db
-        .insert(configuracoes)
-        .values({
-          id: 'geral',
-          numero_express: configs.numeroExpress || null,
-          iban: configs.iban || null,
-          banco: configs.banco || null,
-          titular: configs.titular || null,
-          whatsapp_admin: configs.whatsappAdmin || null,
-        })
-        .onConflictDoUpdate({
-          target: configuracoes.id,
-          set: {
+    if (configs && typeof configs === 'object') {
+      try {
+        await db
+          .insert(configuracoes)
+          .values({
+            id: 'geral',
             numero_express: configs.numeroExpress || null,
             iban: configs.iban || null,
             banco: configs.banco || null,
             titular: configs.titular || null,
             whatsapp_admin: configs.whatsappAdmin || null,
-          },
-        });
-      count++;
-    }
-
-    // 4. Sync Admins
-    for (const mail of adminList) {
-      if (mail && typeof mail === 'string') {
-        await db.insert(admins).values({ email: mail.toLowerCase().trim() }).onConflictDoNothing();
+          })
+          .onConflictDoUpdate({
+            target: configuracoes.id,
+            set: {
+              numero_express: configs.numeroExpress || null,
+              iban: configs.iban || null,
+              banco: configs.banco || null,
+              titular: configs.titular || null,
+              whatsapp_admin: configs.whatsappAdmin || null,
+            },
+          });
         count++;
+      } catch (errC) {
+        console.warn('[Neon sync-admin] Erro ao sincronizar configurações:', errC);
       }
     }
 
-    res.json({
+    // 4. Sync Admins
+    if (Array.isArray(adminList)) {
+      for (const mail of adminList) {
+        if (mail && typeof mail === 'string') {
+          try {
+            await db.insert(admins).values({ email: mail.toLowerCase().trim() }).onConflictDoNothing();
+            count++;
+          } catch (errAdm) {
+            console.warn(`[Neon sync-admin] Erro ao sincronizar admin ${mail}:`, errAdm);
+          }
+        }
+      }
+    }
+
+    return res.status(200).json({
       success: true,
       syncedItemsCount: count,
       message: 'Dados administrativos gravados com sucesso no Neon PostgreSQL.',
     });
   } catch (err: any) {
-    console.error('[Neon] Erro no sync-admin:', err);
-    res.status(500).json({ error: "Erro interno ao processar operação no banco de dados." });
+    console.error('Sync error (admin):', err);
+    return res.status(500).json({
+      success: false,
+      message: "Falha ao sincronizar dados de administração",
+      details: err?.message || String(err),
+    });
   }
 });
 

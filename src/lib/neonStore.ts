@@ -215,6 +215,21 @@ class NeonDatabaseManager {
   private isSyncing = false;
   private lastSyncTime: string | null = null;
   private pendingSyncCount = 0;
+  private retryTimeout: any = null;
+
+  private scheduleSilentRetry(atelieId?: string) {
+    if (this.retryTimeout) return;
+    this.retryTimeout = setTimeout(() => {
+      this.retryTimeout = null;
+      if (typeof navigator !== 'undefined' && navigator.onLine && !this.isOfflineMode()) {
+        if (atelieId || this.activeAtelieId) {
+          this.syncIfOnline(atelieId || this.activeAtelieId, true).catch(() => {});
+        } else if (this.isAdminSyncActive) {
+          this.syncAdminIfOnline(true).catch(() => {});
+        }
+      }
+    }, 25000);
+  }
 
   constructor() {
     this.initLocalStorageSeed();
@@ -511,10 +526,16 @@ class NeonDatabaseManager {
       if (typeof localStorage !== 'undefined') {
         localStorage.setItem('flowtailor_last_sync', timeStr);
       }
-      this.resetPendingSync();
+      if (result.success) {
+        this.resetPendingSync();
+      } else {
+        this.scheduleSilentRetry(targetId);
+      }
       this.notifySyncListeners(false);
       return result.success;
     } catch (e) {
+      console.warn('[syncIfOnline Warning - Dados preservados localmente]:', e);
+      this.scheduleSilentRetry(targetId);
       this.notifySyncListeners(false);
       return false;
     }
@@ -533,10 +554,16 @@ class NeonDatabaseManager {
       if (typeof localStorage !== 'undefined') {
         localStorage.setItem('flowtailor_last_sync', timeStr);
       }
-      this.resetPendingSync();
+      if (result.success) {
+        this.resetPendingSync();
+      } else {
+        this.scheduleSilentRetry();
+      }
       this.notifySyncListeners(false);
       return result.success;
     } catch (e) {
+      console.warn('[syncAdminIfOnline Warning - Dados preservados localmente]:', e);
+      this.scheduleSilentRetry();
       this.notifySyncListeners(false);
       return false;
     }
@@ -1093,7 +1120,7 @@ class NeonDatabaseManager {
       const medidas = this.getMedidas(atelieId);
       const totalCount = (atelie ? 1 : 0) + clientes.length + pedidos.length + medidas.length;
 
-      // Ensure local IndexedDB is completely up-to-date
+      // 1. Ensure local IndexedDB is completely up-to-date BEFORE attempting remote call
       if (atelie) await idbSave('atelies', atelie);
       if (clientes.length > 0) await idbSaveBulk('clientes', clientes.map(c => ({ ...c, atelieId })));
       if (pedidos.length > 0) await idbSaveBulk('encomendas', pedidos.map(p => ({ ...p, atelieId })));
@@ -1110,30 +1137,46 @@ class NeonDatabaseManager {
       onProgress?.(15, 'A estabelecer ligação segura com o Neon PostgreSQL...');
       onProgress?.(45, 'A persistir registos relacionais (atelies, clientes, encomendas, medidas)...');
 
-      const response = await fetch('/api/neon/sync-atelie', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          atelie,
-          clientes,
-          encomendas: pedidos,
-          medidas,
-        }),
-      });
+      let response: Response;
+      try {
+        response = await fetch('/api/neon/sync-atelie', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            atelie,
+            clientes,
+            encomendas: pedidos,
+            medidas,
+          }),
+        });
+      } catch (networkErr: any) {
+        console.warn('[Neon Sync Network Failure - Registos preservados localmente]:', networkErr);
+        this.scheduleSilentRetry(atelieId);
+        onProgress?.(100, 'Dados guardados localmente no dispositivo (IndexedDB). Sincronização em nuvem reagendada.');
+        return { success: false, syncedItemsCount: totalCount, error: networkErr?.message || 'Falha de rede' };
+      }
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || `Erro de rede HTTP ${response.status}`);
+      const responseData = await response.json().catch(() => null);
+
+      if (!response.ok || (responseData && responseData.success === false)) {
+        const errorMsg = responseData?.message || responseData?.details || responseData?.error || `Erro de sincronização HTTP ${response.status}`;
+        console.warn('[Neon Sync API Notice - Dados guardados no IndexedDB]:', errorMsg);
+        this.scheduleSilentRetry(atelieId);
+        onProgress?.(100, 'Dados guardados localmente no dispositivo (IndexedDB).');
+        return { success: false, syncedItemsCount: totalCount, error: errorMsg };
       }
 
       onProgress?.(85, 'A reconciliar atualizações da base de dados relacional...');
-      await this.fetchAtelieDataFromNeon(atelieId);
+      await this.fetchAtelieDataFromNeon(atelieId).catch((fetchErr) => {
+        console.warn('[Neon Post-Sync Fetch Notice]:', fetchErr);
+      });
 
       this.resetPendingSync();
       onProgress?.(100, 'Todos os dados foram gravados com sucesso no Neon PostgreSQL!');
       return { success: true, syncedItemsCount: totalCount };
     } catch (err: any) {
-      console.warn('[Neon Sync Warning]:', err);
+      console.warn('[Neon Sync Warning - Dados guardados no IndexedDB]:', err);
+      this.scheduleSilentRetry(atelieId);
       onProgress?.(100, 'Sincronização concluída com base de dados local.');
       return { success: false, syncedItemsCount: 0, error: err?.message || String(err) };
     }
@@ -1165,31 +1208,46 @@ class NeonDatabaseManager {
       onProgress?.(15, 'A estabelecer ligação de Administrador com Neon PostgreSQL...');
       onProgress?.(50, 'A persistir ateliês, solicitações e parâmetros no Neon...');
 
-      const response = await fetch('/api/neon/sync-admin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          atelies,
-          solicitacoes,
-          configs,
-          admins,
-        }),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || `Erro de rede HTTP ${response.status}`);
+      let response: Response;
+      try {
+        response = await fetch('/api/neon/sync-admin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            atelies,
+            solicitacoes,
+            configs,
+            admins,
+          }),
+        });
+      } catch (networkErr: any) {
+        console.warn('[Neon Admin Sync Network Failure - Registos preservados localmente]:', networkErr);
+        this.scheduleSilentRetry();
+        onProgress?.(100, 'Registos administrativos guardados localmente (IndexedDB). Sincronização em nuvem reagendada.');
+        return { success: false, syncedItemsCount: totalCount, error: networkErr?.message || 'Falha de rede' };
       }
 
-      const data = await response.json();
+      const responseData = await response.json().catch(() => null);
+
+      if (!response.ok || (responseData && responseData.success === false)) {
+        const errorMsg = responseData?.message || responseData?.details || responseData?.error || `Erro de sincronização HTTP ${response.status}`;
+        console.warn('[Neon Admin Sync Notice - Dados guardados no IndexedDB]:', errorMsg);
+        this.scheduleSilentRetry();
+        onProgress?.(100, 'Registos administrativos guardados localmente (IndexedDB).');
+        return { success: false, syncedItemsCount: totalCount, error: errorMsg };
+      }
+
       onProgress?.(85, 'A sincronizar dados administrativos globais...');
-      await this.fetchAdminDataFromNeon();
+      await this.fetchAdminDataFromNeon().catch((fetchErr) => {
+        console.warn('[Neon Admin Post-Sync Fetch Notice]:', fetchErr);
+      });
 
       this.resetPendingSync();
       onProgress?.(100, 'Todos os registos administrativos foram gravados no Neon PostgreSQL com sucesso!');
-      return { success: true, syncedItemsCount: data.syncedItemsCount || totalCount };
+      return { success: true, syncedItemsCount: responseData?.syncedItemsCount || totalCount };
     } catch (err: any) {
-      console.warn('[Neon Admin Sync Warning]:', err);
+      console.warn('[Neon Admin Sync Warning - Dados guardados no IndexedDB]:', err);
+      this.scheduleSilentRetry();
       onProgress?.(100, 'Sincronização administrativa concluída em cache local.');
       return { success: false, syncedItemsCount: 0, error: err?.message || String(err) };
     }
@@ -1208,6 +1266,42 @@ export class CustomAuthService {
   }
 
   private restoreSession() {
+    if (typeof window !== 'undefined' && window.location) {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const token = params.get('token');
+        const loginParam = params.get('login');
+        const uidParam = params.get('uid');
+        const emailParam = params.get('email');
+        const roleParam = params.get('role');
+        const nameParam = params.get('name');
+
+        if (token || loginParam === 'success') {
+          if (token) {
+            localStorage.setItem('flowtailor_jwt_token', token);
+          }
+          if (emailParam && uidParam) {
+            const mailLower = emailParam.toLowerCase().trim();
+            const isAdmin = roleParam === 'admin' || localDb.getAdmins().map(a => a.toLowerCase().trim()).includes(mailLower);
+            localStorage.setItem('ateliepro_current_uid', uidParam);
+            localStorage.setItem('ateliepro_current_email', mailLower);
+            const userData = {
+              uid: uidParam,
+              email: mailLower,
+              role: isAdmin ? 'admin' : 'atelie_owner',
+              isAdmin,
+              atelieName: nameParam || (isAdmin ? 'Administração Central' : `Ateliê de ${mailLower.split('@')[0]}`),
+              authProvider: 'google',
+            };
+            localStorage.setItem('flowtailor_current_user', JSON.stringify(userData));
+            localStorage.setItem('flowtailor_session', JSON.stringify(userData));
+          }
+        }
+      } catch (e) {
+        console.warn('Error reading URL auth parameters in restoreSession:', e);
+      }
+    }
+
     if (typeof localStorage === 'undefined') return;
     const uid = localStorage.getItem('ateliepro_current_uid');
     const email = localStorage.getItem('ateliepro_current_email');
@@ -1215,7 +1309,10 @@ export class CustomAuthService {
       const mailLower = email.toLowerCase().trim();
       const adminList = localDb.getAdmins().map(a => a.toLowerCase().trim());
       const isEmailAdmin = adminList.includes(mailLower);
-      const atelie = !isEmailAdmin ? localDb.getAtelie(uid) : null;
+      let atelie = !isEmailAdmin ? localDb.getAtelie(uid) : null;
+      if (!isEmailAdmin && !atelie) {
+        atelie = localDb.getAtelies().find(a => a.emailOwner.toLowerCase() === mailLower) || null;
+      }
       this.currentSession = { 
         uid, 
         email: mailLower, 
@@ -1226,7 +1323,7 @@ export class CustomAuthService {
       if (isEmailAdmin) {
         localDb.initAdminRealtimeSync();
       } else if (atelie) {
-        localDb.initRealtimeSync(uid);
+        localDb.initRealtimeSync(atelie.id || uid);
       }
     } else {
       this.currentSession = null;

@@ -649,8 +649,9 @@ router.all([
       });
     }
 
-    // Redirect to main dashboard with login=success and authentication parameters
-    const redirectUrl = `/?login=success&token=${encodeURIComponent(tokens.accessToken)}&uid=${encodeURIComponent(userPayload.userId)}&email=${encodeURIComponent(userPayload.email)}&role=${encodeURIComponent(role)}&name=${encodeURIComponent(userPayload.atelieName || '')}`;
+    // Redirect directly to /admin or /dashboard with login=success and authentication parameters
+    const targetPath = isAdmin ? '/admin' : '/dashboard';
+    const redirectUrl = `${targetPath}?login=success&token=${encodeURIComponent(tokens.accessToken)}&uid=${encodeURIComponent(userPayload.userId)}&email=${encodeURIComponent(userPayload.email)}&role=${encodeURIComponent(role)}&name=${encodeURIComponent(userPayload.atelieName || '')}`;
     return res.redirect(redirectUrl);
   } catch (err: any) {
     console.error('[Google OAuth Callback Exception]:', err);

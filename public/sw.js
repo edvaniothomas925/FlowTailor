@@ -79,19 +79,43 @@ function isStaticAsset(url, request) {
 // 3. Fetch Event: Implement SWR & Network Strategies
 self.addEventListener('fetch', (event) => {
   const { request } = event;
-
-  // Only handle HTTP/HTTPS GET requests
-  if (request.method !== 'GET') return;
-
   const url = new URL(request.url);
 
-  // Bypass API routes, WebSockets & Browser extensions
-  if (
-    url.pathname.startsWith('/api/') ||
-    url.protocol === 'chrome-extension:'
-  ) {
+  // Bypass chrome extensions or non-http protocols
+  if (url.protocol === 'chrome-extension:' || (url.protocol !== 'http:' && url.protocol !== 'https:')) {
     return;
   }
+
+  // 1. API & Dynamic Server Routes: Network First with Graceful JSON Fallback
+  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/auth/') || url.pathname.startsWith('/neon/')) {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          // Pass through server response
+          return response;
+        })
+        .catch((err) => {
+          console.warn('[SW] Falha de rede em requisição de API capturada:', err);
+          return new Response(
+            JSON.stringify({
+              success: false,
+              offline: true,
+              message: 'Falha de conexão com o servidor. A operar em modo offline seguro.',
+              details: err?.message || 'Network request failed',
+            }),
+            {
+              status: 503,
+              statusText: 'Service Unavailable',
+              headers: { 'Content-Type': 'application/json' },
+            }
+          );
+        })
+    );
+    return;
+  }
+
+  // Only handle HTTP/HTTPS GET requests for caching
+  if (request.method !== 'GET') return;
 
   // A. Navigation / Document Requests (HTML Pages & SPA Routes)
   if (request.mode === 'navigate' || request.destination === 'document' || url.pathname === '/') {

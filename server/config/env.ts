@@ -19,6 +19,10 @@ const envSchema = z.object({
   NEON_DATABASE_URL: z.string().optional(),
   NEON_AUTH_URL: z.string().default('https://ep-wispy-moon-zab2krf0.neonauth.c-2.eu-west-2.aws.neon.tech/neondb/auth'),
   NEON_JWKS_URL: z.string().default('https://ep-wispy-moon-zab2krf0.neonauth.c-2.eu-west-2.aws.neon.tech/neondb/auth/.well-known/jwks.json'),
+  GOOGLE_CLIENT_ID: z.string().optional(),
+  GOOGLE_CLIENT_SECRET: z.string().optional(),
+  GOOGLE_OAUTH_REDIRECT_URI: z.string().optional(),
+  VERCEL_URL: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -44,4 +48,8 @@ export const env = parsed.success
       NEON_DATABASE_URL: process.env.NEON_DATABASE_URL,
       NEON_AUTH_URL: process.env.NEON_AUTH_URL || 'https://ep-wispy-moon-zab2krf0.neonauth.c-2.eu-west-2.aws.neon.tech/neondb/auth',
       NEON_JWKS_URL: process.env.NEON_JWKS_URL || 'https://ep-wispy-moon-zab2krf0.neonauth.c-2.eu-west-2.aws.neon.tech/neondb/auth/.well-known/jwks.json',
+      GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
+      GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
+      GOOGLE_OAUTH_REDIRECT_URI: process.env.GOOGLE_OAUTH_REDIRECT_URI,
+      VERCEL_URL: process.env.VERCEL_URL,
     };

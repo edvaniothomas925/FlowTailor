@@ -255,8 +255,46 @@ export default function App() {
       if (queryCountry === 'BR' || queryCountry === 'PT' || queryCountry === 'AO') {
         setAuthInitialCountry(queryCountry);
       }
+
+      const authError = params.get('auth_error') || params.get('error');
+      if (authError) {
+        toast.error('Erro na autenticação do Google: ' + decodeURIComponent(authError));
+        window.history.replaceState({}, '', window.location.pathname);
+      }
+
+      const loginParam = params.get('login');
+      const token = params.get('token');
+      const uid = params.get('uid');
+      const email = params.get('email');
+      const role = params.get('role');
+      const atelieName = params.get('name');
+
+      if (loginParam === 'success' || token) {
+        if (token) {
+          localStorage.setItem('flowtailor_jwt_token', token);
+        }
+        if (email && uid) {
+          const mailLower = email.toLowerCase().trim();
+          const isAdmin = role === 'admin' || localDb.getAdmins().map(a => a.toLowerCase().trim()).includes(mailLower);
+          localStorage.setItem('ateliepro_current_uid', uid);
+          localStorage.setItem('ateliepro_current_email', mailLower);
+          const userData = {
+            uid,
+            email: mailLower,
+            role: isAdmin ? 'admin' : 'atelie_owner',
+            isAdmin,
+            atelieName: atelieName || (isAdmin ? 'Administração Central' : `Ateliê de ${mailLower.split('@')[0]}`),
+            authProvider: 'google',
+          };
+          localStorage.setItem('flowtailor_current_user', JSON.stringify(userData));
+          localStorage.setItem('flowtailor_session', JSON.stringify(userData));
+        }
+        toast.success('Sessão iniciada com sucesso via Google!');
+        window.history.replaceState({}, '', window.location.pathname);
+        refreshSession();
+      }
     } catch (e) {
-      console.warn("Could not read country parameter on mount", e);
+      console.warn("Could not read URL parameters on mount", e);
     }
   }, []);
 
@@ -905,6 +943,22 @@ function AuthScreen({ onLoginSuccess, initialTab = 'login', onBackToLanding, ini
 
   const openGoogleAuth = async () => {
     setErrorMess('');
+    try {
+      // Verifica se o Google OAuth direto está habilitado no servidor
+      const res = await fetch('/api/auth/google?format=json', {
+        headers: { Accept: 'application/json' },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.url) {
+          window.location.href = data.url;
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn('[Google OAuth] Utilizando fallback de autenticação:', e);
+    }
+
     if (email.trim() && email.includes('@')) {
       await performGoogleLogin(email.trim());
     } else {

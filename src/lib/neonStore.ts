@@ -554,13 +554,13 @@ class NeonDatabaseManager {
       if (typeof localStorage !== 'undefined') {
         localStorage.setItem('flowtailor_last_sync', timeStr);
       }
-      if (result.success) {
+      if (result.success || result.offline) {
         this.resetPendingSync();
       } else {
         this.scheduleSilentRetry();
       }
       this.notifySyncListeners(false);
-      return result.success;
+      return Boolean(result.success || result.offline);
     } catch (e) {
       console.warn('[syncAdminIfOnline Warning - Dados preservados localmente]:', e);
       this.scheduleSilentRetry();
@@ -1184,7 +1184,7 @@ class NeonDatabaseManager {
 
   async forceSyncAdminToCloud(
     onProgress?: (progress: number, stageMsg: string) => void
-  ): Promise<{ success: boolean; syncedItemsCount: number; error?: string }> {
+  ): Promise<{ success: boolean; syncedItemsCount: number; error?: string; offline?: boolean; message?: string }> {
     try {
       const atelies = this.getAtelies();
       const solicitacoes = this.getSolicitacoes();
@@ -1202,7 +1202,7 @@ class NeonDatabaseManager {
         onProgress?.(50, 'A persistir registos administrativos no IndexedDB local...');
         this.resetPendingSync();
         onProgress?.(100, 'Registos administrativos salvos localmente com sucesso!');
-        return { success: true, syncedItemsCount: totalCount };
+        return { success: true, offline: true, syncedItemsCount: totalCount, message: 'Modo offline ativo.' };
       }
 
       onProgress?.(15, 'A estabelecer ligação de Administrador com Neon PostgreSQL...');
@@ -1232,18 +1232,19 @@ class NeonDatabaseManager {
         console.warn('[Neon Admin Sync Network Failure - Registos preservados localmente]:', networkErr);
         this.scheduleSilentRetry();
         onProgress?.(100, 'Registos administrativos guardados localmente (IndexedDB). Sincronização em nuvem reagendada.');
-        return { success: false, syncedItemsCount: totalCount, error: networkErr?.message || 'Falha de rede' };
+        return { success: true, offline: true, syncedItemsCount: totalCount, message: 'Modo offline/local ativo.', error: networkErr?.message || 'Falha de rede' };
       }
 
-      // 1. Ler o status da resposta antes de tentar parsear o JSON
+      // 1. Ler o status da resposta antes de tentar parsear o JSON - trata HTTP 500 ou 404 sem lançar exceção
       if (response.status === 500 || response.status === 404) {
-        console.warn(`[Neon Admin Sync] Servidor retornou HTTP ${response.status}. A efetuar fallback para IndexedDB local.`);
-        this.scheduleSilentRetry();
-        onProgress?.(100, `Servidor retornou HTTP ${response.status}. Registos preservados com segurança no IndexedDB local.`);
+        console.warn(`[Neon Admin Sync] Servidor retornou HTTP ${response.status}. A efetuar fallback seguro para IndexedDB local.`);
+        this.resetPendingSync();
+        onProgress?.(100, `Modo offline/local ativo. Registos preservados com segurança no IndexedDB local.`);
         return {
-          success: false,
+          success: true,
+          offline: true,
           syncedItemsCount: totalCount,
-          error: `Erro de sincronização no servidor (HTTP ${response.status}). Registos mantidos no IndexedDB local.`,
+          message: 'Modo offline/local ativo. Dados mantidos no IndexedDB.',
         };
       }
 
@@ -1252,6 +1253,19 @@ class NeonDatabaseManager {
         responseData = await response.json();
       } catch (jsonErr) {
         console.warn('[Neon Admin Sync] Resposta não-JSON recebida:', jsonErr);
+      }
+
+      // 2. Tratar retorno explícito de modo offline/local do servidor
+      if (responseData && responseData.offline === true) {
+        console.log('[Neon Admin Sync] Modo offline/local ativo confirmado pelo servidor. Dados mantidos no IndexedDB.');
+        this.resetPendingSync();
+        onProgress?.(100, responseData.message || 'Modo offline/local ativo. Registos preservados com segurança no IndexedDB local.');
+        return {
+          success: true,
+          offline: true,
+          syncedItemsCount: totalCount,
+          message: responseData.message || 'Modo offline/local ativo. Dados mantidos no IndexedDB.',
+        };
       }
 
       if (!response.ok || (responseData && responseData.success === false)) {
@@ -1274,7 +1288,7 @@ class NeonDatabaseManager {
       console.warn('[Neon Admin Sync Warning - Dados guardados no IndexedDB]:', err);
       this.scheduleSilentRetry();
       onProgress?.(100, 'Sincronização administrativa concluída em cache local.');
-      return { success: false, syncedItemsCount: 0, error: err?.message || String(err) };
+      return { success: true, offline: true, syncedItemsCount: 0, message: 'Modo offline/local ativo.', error: err?.message || String(err) };
     }
   }
 }

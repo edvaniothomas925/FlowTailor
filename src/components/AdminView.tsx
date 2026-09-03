@@ -323,7 +323,11 @@ export default function AdminView({ onRefreshAtelieSession }: AdminViewProps) {
       });
 
       if (result.success) {
-        showToast('Sincronização com o Neon DB concluída com sucesso!', 'success');
+        if (result.offline) {
+          showToast('Modo offline/local ativo. Dados mantidos no IndexedDB.', 'info');
+        } else {
+          showToast('Sincronização com o Neon DB concluída com sucesso!', 'success');
+        }
       } else {
         showToast(`Erro na sincronização: ${result.error || 'Falha na comunicação'}`, 'error');
       }

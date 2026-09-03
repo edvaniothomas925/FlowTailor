@@ -2232,7 +2232,11 @@ function ConfiguracoesView({ atelie, onRefresh, onNewAlertTriggered }: Configura
         localStorage.setItem('flowtailor_last_sync', timeStr);
 
         if (result.success) {
-          toast.success('Sincronização com o Neon DB concluída com sucesso!');
+          if (result.offline) {
+            toast.success('Modo offline/local ativo. Dados mantidos com segurança no IndexedDB.');
+          } else {
+            toast.success('Sincronização com o Neon DB concluída com sucesso!');
+          }
         } else {
           toast.error(`Erro na sincronização administrativa: ${result.error || 'Falha na comunicação'}`);
         }

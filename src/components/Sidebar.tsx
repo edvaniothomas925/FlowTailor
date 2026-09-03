@@ -1,18 +1,19 @@
+import React, { useState, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { customAuth, localDb } from '../lib/neonStore';
 import { LayoutDashboard, Users, Scissors, Settings, ShieldAlert, LogOut, Sparkles, X, Download, TrendingUp, Cloud, CloudOff, RefreshCw } from 'lucide-react';
-import { useState, useEffect } from 'react';
 
 interface SidebarProps {
   onLogout: () => void;
   isAdmin: boolean;
   atelieName?: string;
+  userName?: string;
   isOpenMobile?: boolean;
   onCloseMobile?: () => void;
   syncMode?: 'hybrid' | 'offline' | 'offline_local';
 }
 
-export default function Sidebar({ onLogout, isAdmin, atelieName, isOpenMobile, onCloseMobile, syncMode }: SidebarProps) {
+export default function Sidebar({ onLogout, isAdmin, atelieName, userName, isOpenMobile, onCloseMobile, syncMode }: SidebarProps) {
   const location = useLocation();
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
   const [isStandalone, setIsStandalone] = useState(false);
@@ -192,7 +193,9 @@ export default function Sidebar({ onLogout, isAdmin, atelieName, isOpenMobile, o
             {isAdmin ? 'Acesso Administrativo' : 'Ateliê Ativo'}
           </p>
           <p className="text-sm font-bold text-slate-800 truncate">
-            {isAdmin ? 'Administração Global' : (atelieName || 'Meu Ateliê')}
+            {isAdmin 
+              ? (userName || 'Painel de Administração') 
+              : (atelieName || (userName ? `Ateliê de ${userName}` : 'Meu Ateliê'))}
           </p>
         </div>
 

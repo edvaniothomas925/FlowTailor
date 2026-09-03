@@ -84,6 +84,8 @@ export type UserRole = 'admin' | 'super_admin' | 'atelie_owner' | 'staff' | 'use
 export interface UserSession {
   uid: string;
   email: string | null;
+  name?: string;
+  displayName?: string;
   role: UserRole;
   isAdmin: boolean;
   atelie?: Atelie | null;

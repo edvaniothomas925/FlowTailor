@@ -599,9 +599,12 @@ router.all([
       ? `google_${googleProfile.sub}`
       : (isAdmin ? `admin_${mailLower.split('@')[0]}` : `user_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`);
 
+    const userDisplayName = googleProfile.name?.trim() || mailLower.split('@')[0];
     const userPayload: UserJwtPayload = {
       userId,
       email: mailLower,
+      name: isAdmin ? (userDisplayName || 'Administrador') : userDisplayName,
+      displayName: userDisplayName,
       role,
       atelieName: googleProfile.name
         ? `Ateliê de ${googleProfile.name}`
@@ -617,6 +620,8 @@ router.all([
     res.cookie('flowtailor_session', JSON.stringify({
       uid: userPayload.userId,
       email: userPayload.email,
+      name: userPayload.name,
+      displayName: userPayload.displayName,
       role,
       isAdmin,
       atelieName: userPayload.atelieName,
@@ -651,7 +656,7 @@ router.all([
 
     // Redirect directly to /admin or /dashboard with login=success and authentication parameters
     const targetPath = isAdmin ? '/admin' : '/dashboard';
-    const redirectUrl = `${targetPath}?login=success&token=${encodeURIComponent(tokens.accessToken)}&uid=${encodeURIComponent(userPayload.userId)}&email=${encodeURIComponent(userPayload.email)}&role=${encodeURIComponent(role)}&name=${encodeURIComponent(userPayload.atelieName || '')}`;
+    const redirectUrl = `${targetPath}?login=success&token=${encodeURIComponent(tokens.accessToken)}&uid=${encodeURIComponent(userPayload.userId)}&email=${encodeURIComponent(userPayload.email)}&role=${encodeURIComponent(role)}&name=${encodeURIComponent(userPayload.atelieName || '')}&displayName=${encodeURIComponent(userPayload.displayName || '')}`;
     return res.redirect(redirectUrl);
   } catch (err: any) {
     console.error('[Google OAuth Callback Exception]:', err);
@@ -713,9 +718,12 @@ router.post('/google/verify-credential', async (req: Request, res: Response) => 
       ? `google_${payload.sub}`
       : (isAdmin ? `admin_${mailLower.split('@')[0]}` : `user_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`);
 
+    const userDisplayName = payload.name?.trim() || mailLower.split('@')[0];
     const userPayload: UserJwtPayload = {
       userId,
       email: mailLower,
+      name: isAdmin ? (userDisplayName || 'Administrador') : userDisplayName,
+      displayName: userDisplayName,
       role,
       atelieName: payload.name
         ? `Ateliê de ${payload.name}`
@@ -760,10 +768,13 @@ router.post('/neon/sync-session', async (req: Request, res: Response) => {
   const isAdmin = await isAuthorizedAdminEmail(mailLower);
   
   const userId = uid || (isAdmin ? `admin_${mailLower.split('@')[0]}` : `user_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`);
+  const userDisplayName = displayName?.trim() || mailLower.split('@')[0];
 
   const payload: UserJwtPayload = {
     userId,
     email: mailLower,
+    name: isAdmin ? (userDisplayName || 'Administrador') : userDisplayName,
+    displayName: userDisplayName,
     role: isAdmin ? 'admin' : 'atelie_owner',
     atelieName: displayName ? `Ateliê de ${displayName}` : (isAdmin ? 'Administração Central' : `Ateliê de ${mailLower.split('@')[0]}`),
     authProvider,
@@ -815,9 +826,12 @@ router.post('/google/authenticate', async (req: Request, res: Response) => {
     const role = isAdmin ? 'admin' : 'atelie_owner';
     const userId = sub ? `google_${sub}` : (isAdmin ? `admin_${mailLower.split('@')[0]}` : `user_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`);
 
+    const userDisplayName = displayName?.trim() || mailLower.split('@')[0];
     const payload: UserJwtPayload = {
       userId,
       email: mailLower,
+      name: isAdmin ? (userDisplayName || 'Administrador') : userDisplayName,
+      displayName: userDisplayName,
       role,
       atelieName: displayName ? `Ateliê de ${displayName}` : (isAdmin ? 'Administração Central' : `Ateliê de ${mailLower.split('@')[0]}`),
       authProvider: 'google',

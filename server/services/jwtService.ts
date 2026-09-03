@@ -4,6 +4,8 @@ import { env } from '../config/env.js';
 export interface UserJwtPayload {
   userId: string;
   email?: string;
+  name?: string;
+  displayName?: string;
   role: 'admin' | 'atelie_owner' | 'staff' | 'user';
   atelieId?: string;
   atelieName?: string;

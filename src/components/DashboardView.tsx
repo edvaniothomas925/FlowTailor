@@ -6,7 +6,7 @@ import { generateWhatsAppText } from '../lib/notificationEngine';
 import { formatarMoeda } from '../lib/localization';
 
 interface DashboardViewProps {
-  atelie: Atelie;
+  atelie?: Atelie | null;
 }
 
 export default function DashboardView({ atelie }: DashboardViewProps) {
@@ -17,11 +17,29 @@ export default function DashboardView({ atelie }: DashboardViewProps) {
   const [mensagensGeradas, setMensagensGeradas] = useState<Record<string, string>>({});
   const [statusCopiado, setStatusCopiado] = useState<Record<string, boolean>>({});
 
+  const currentAtelie: Atelie = useMemo(() => {
+    if (atelie) return atelie;
+    const firstLocal = localDb.getAtelies()[0];
+    if (firstLocal) return firstLocal;
+    return {
+      id: 'default_atelie',
+      nome: 'Meu Ateliê',
+      emailOwner: '',
+      telefone: '244923000000',
+      plano: 'basico',
+      ativo: true,
+      dataVencimento: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+      criadoEm: new Date().toISOString(),
+      pais: 'AO',
+      avatarIcon: 'scissors',
+    };
+  }, [atelie]);
+
   useEffect(() => {
     const refreshData = () => {
-      const listPedidos = localDb.getPedidos(atelie.id);
+      const listPedidos = localDb.getPedidos(currentAtelie.id);
       setPedidos(listPedidos);
-      const listClientes = localDb.getClientes(atelie.id);
+      const listClientes = localDb.getClientes(currentAtelie.id);
       setTotalClientes(listClientes.length);
     };
 
@@ -30,7 +48,7 @@ export default function DashboardView({ atelie }: DashboardViewProps) {
       refreshData();
     });
     return () => unsub();
-  }, [atelie.id]);
+  }, [currentAtelie.id]);
 
   // Calculations for KPI cards wrapped in useMemo for optimal CPU efficiency
   const dashboardStats = useMemo(() => {
@@ -69,13 +87,13 @@ export default function DashboardView({ atelie }: DashboardViewProps) {
   const totalOutstanding = dashboardStats.outstanding;
 
   // Time-to-expire check for Ateliê subscription (5 days threshold)
-  const expireDate = new Date(atelie.dataVencimento);
+  const expireDate = new Date(currentAtelie.dataVencimento);
   const daysToExpire = Math.ceil((expireDate.getTime() - Date.now()) / (24 * 60 * 60 * 1000));
   const showExpireWarning = daysToExpire <= 5 && daysToExpire >= 0;
 
   // Generate customized WhatsApp notification message instantly on client side using custom templates
   const handleGerarMensagem = (pedido: Pedido) => {
-    const msg = generateWhatsAppText(pedido.clienteNome, pedido.descricao, pedido.prazoEntrega, atelie.id);
+    const msg = generateWhatsAppText(pedido.clienteNome, pedido.descricao, pedido.prazoEntrega, currentAtelie.id);
     setMensagensGeradas((prev) => ({
       ...prev,
       [pedido.id]: msg,
@@ -107,7 +125,7 @@ export default function DashboardView({ atelie }: DashboardViewProps) {
             <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
             <div>
               <p className="text-sm font-semibold">A sua licença FlowTailor expira em breve!</p>
-              <p className="text-xs text-amber-800">Sua conta será suspensa em {daysToExpire} dias ({new Date(atelie.dataVencimento).toLocaleDateString('pt-AO')}). Efetue a renovação para manter o acesso.</p>
+              <p className="text-xs text-amber-800">Sua conta será suspensa em {daysToExpire} dias ({new Date(currentAtelie.dataVencimento).toLocaleDateString('pt-AO')}). Efetue a renovação para manter o acesso.</p>
             </div>
           </div>
           <a href="/configuracoes" className="px-3.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-semibold select-none transition-all">
@@ -118,7 +136,9 @@ export default function DashboardView({ atelie }: DashboardViewProps) {
 
       {/* Profile Welcome */}
       <div>
-        <h2 className="text-2xl font-bold font-display tracking-tight text-gray-950">Bem-vinda de volta ao painel, costureira!</h2>
+        <h2 className="text-2xl font-bold font-display tracking-tight text-gray-950">
+          Bem-vinda de volta ao painel{currentAtelie.nome ? `, ${currentAtelie.nome.replace('Ateliê de ', '')}` : ''}!
+        </h2>
         <p className="text-xs text-gray-500">Métricas gerais e alertas urgentes para o seu ateliê hoje.</p>
       </div>
 
@@ -175,7 +195,7 @@ export default function DashboardView({ atelie }: DashboardViewProps) {
           <div>
             <span className="text-xs font-medium text-slate-500 block">Valores a Receber</span>
             <span className="text-2xl font-bold text-emerald-700 font-display leading-tight">
-              {formatarMoeda(totalOutstanding || 0, atelie)}
+              {formatarMoeda(totalOutstanding || 0, currentAtelie)}
             </span>
             <span className="text-[10px] text-slate-400 block mt-0.5">Sinal pendente do alfaiate</span>
           </div>
@@ -234,7 +254,7 @@ export default function DashboardView({ atelie }: DashboardViewProps) {
                     </div>
                     <p className="text-xs text-gray-600 font-medium">Peça: <span className="text-gray-950 font-semibold">{pedido.descricao}</span></p>
                     <p className="text-xs text-slate-500">
-                      Vence em: <strong className="text-slate-700">{formatDeadline}</strong> · Valor: {formatarMoeda(pedido.valor, atelie)} (Faltam pagar: <strong className="text-emerald-700 font-semibold">{formatarMoeda(pedido.valor - pedido.sinalPago, atelie)}</strong>)
+                      Vence em: <strong className="text-slate-700">{formatDeadline}</strong> · Valor: {formatarMoeda(pedido.valor, currentAtelie)} (Faltam pagar: <strong className="text-emerald-700 font-semibold">{formatarMoeda(pedido.valor - pedido.sinalPago, currentAtelie)}</strong>)
                     </p>
                     <div className="pt-1.5">
                       <button

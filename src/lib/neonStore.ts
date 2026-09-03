@@ -1285,16 +1285,43 @@ export class CustomAuthService {
             const isAdmin = roleParam === 'admin' || localDb.getAdmins().map(a => a.toLowerCase().trim()).includes(mailLower);
             localStorage.setItem('ateliepro_current_uid', uidParam);
             localStorage.setItem('ateliepro_current_email', mailLower);
+            
+            const rawName = nameParam?.trim() || mailLower.split('@')[0];
+            const cleanName = rawName.startsWith('Ateliê de ') ? rawName.replace('Ateliê de ', '') : rawName;
+            const atelieName = nameParam ? (nameParam.startsWith('Ateliê') ? nameParam : `Ateliê de ${nameParam}`) : (isAdmin ? 'Administração Central' : `Ateliê de ${cleanName}`);
+            
             const userData = {
               uid: uidParam,
               email: mailLower,
+              name: isAdmin ? (localStorage.getItem('ateliepro_admin_nome') || 'Administrador') : cleanName,
+              displayName: cleanName,
               role: isAdmin ? 'admin' : 'atelie_owner',
               isAdmin,
-              atelieName: nameParam || (isAdmin ? 'Administração Central' : `Ateliê de ${mailLower.split('@')[0]}`),
+              atelieName,
               authProvider: 'google',
             };
             localStorage.setItem('flowtailor_current_user', JSON.stringify(userData));
             localStorage.setItem('flowtailor_session', JSON.stringify(userData));
+
+            // Auto-provision atelie if not admin
+            if (!isAdmin) {
+              let existingAtelie = localDb.getAtelie(uidParam) || localDb.getAtelies().find(a => a.emailOwner.toLowerCase() === mailLower);
+              if (!existingAtelie) {
+                existingAtelie = {
+                  id: uidParam,
+                  nome: atelieName,
+                  emailOwner: mailLower,
+                  telefone: '244923000000',
+                  plano: 'basico',
+                  ativo: true,
+                  dataVencimento: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+                  criadoEm: new Date().toISOString(),
+                  pais: 'AO',
+                  avatarIcon: 'scissors'
+                };
+                localDb.saveAtelie(existingAtelie);
+              }
+            }
           }
         }
       } catch (e) {
@@ -1309,13 +1336,42 @@ export class CustomAuthService {
       const mailLower = email.toLowerCase().trim();
       const adminList = localDb.getAdmins().map(a => a.toLowerCase().trim());
       const isEmailAdmin = adminList.includes(mailLower);
+      
+      let storedUserObj: any = null;
+      try {
+        const rawUser = localStorage.getItem('flowtailor_current_user');
+        if (rawUser) storedUserObj = JSON.parse(rawUser);
+      } catch (e) {}
+
+      const userName = storedUserObj?.name || storedUserObj?.displayName || mailLower.split('@')[0];
+
       let atelie = !isEmailAdmin ? localDb.getAtelie(uid) : null;
       if (!isEmailAdmin && !atelie) {
         atelie = localDb.getAtelies().find(a => a.emailOwner.toLowerCase() === mailLower) || null;
       }
+
+      if (!isEmailAdmin && !atelie) {
+        const atelieTitle = storedUserObj?.atelieName || `Ateliê de ${userName}`;
+        atelie = {
+          id: uid,
+          nome: atelieTitle,
+          emailOwner: mailLower,
+          telefone: '244923000000',
+          plano: 'basico',
+          ativo: true,
+          dataVencimento: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          criadoEm: new Date().toISOString(),
+          pais: 'AO',
+          avatarIcon: 'scissors'
+        };
+        localDb.saveAtelie(atelie);
+      }
+
       this.currentSession = { 
         uid, 
         email: mailLower, 
+        name: isEmailAdmin ? (localStorage.getItem('ateliepro_admin_nome') || 'Administrador') : userName,
+        displayName: userName,
         role: isEmailAdmin ? 'admin' : 'atelie_owner',
         isAdmin: isEmailAdmin, 
         atelie: isEmailAdmin ? null : atelie 
@@ -1358,6 +1414,7 @@ export class CustomAuthService {
 
     try {
       const mailLower = emailHint.toLowerCase().trim();
+      const userName = displayNameHint?.trim() || mailLower.split('@')[0];
       
       // Sincronizar e validar com o backend Express / Neon PostgreSQL
       let backendAdmin = false;
@@ -1369,7 +1426,7 @@ export class CustomAuthService {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             email: mailLower,
-            displayName: displayNameHint || mailLower.split('@')[0],
+            displayName: userName,
             authProvider: 'google_oauth',
           }),
         });
@@ -1400,6 +1457,8 @@ export class CustomAuthService {
         this.currentSession = { 
           uid, 
           email: mailLower, 
+          name: localStorage.getItem('ateliepro_admin_nome') || 'Administrador',
+          displayName: 'Administrador',
           role: 'admin',
           isAdmin: true, 
           atelie: null 
@@ -1410,13 +1469,15 @@ export class CustomAuthService {
         if (!existingAtelie) {
           existingAtelie = {
             id: uid,
-            nome: displayNameHint ? `Ateliê de ${displayNameHint}` : `Ateliê de ${mailLower.split('@')[0]}`,
+            nome: displayNameHint ? `Ateliê de ${displayNameHint}` : `Ateliê de ${userName}`,
             emailOwner: mailLower,
             telefone: '244923000000',
             plano: 'basico',
             ativo: true,
             dataVencimento: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-            criadoEm: new Date().toISOString()
+            criadoEm: new Date().toISOString(),
+            pais: 'AO',
+            avatarIcon: 'scissors',
           };
           await localDb.saveAtelie(existingAtelie);
         }
@@ -1427,6 +1488,8 @@ export class CustomAuthService {
         this.currentSession = { 
           uid, 
           email: mailLower, 
+          name: userName,
+          displayName: userName,
           role: 'atelie_owner',
           isAdmin: false, 
           atelie 

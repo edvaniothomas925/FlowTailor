@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { customAuth, localDb, sanitizeForPayload } from './lib/neonStore';
 import { UserSession, Atelie } from './types';
@@ -121,14 +121,44 @@ export function AtelieAvatar({
   }
 }
 
+function getOrCreateUserAtelie(currentSession: UserSession | null): Atelie | null {
+  if (!currentSession || currentSession.isAdmin || !currentSession.email) return null;
+  const mailLower = currentSession.email.toLowerCase().trim();
+  let found = localDb.getAtelies().find(a => a.emailOwner.toLowerCase() === mailLower)
+    || (currentSession.uid ? localDb.getAtelie(currentSession.uid) : undefined);
+
+  if (!found) {
+    let storedUserObj: any = null;
+    try {
+      const rawU = localStorage.getItem('flowtailor_current_user');
+      if (rawU) storedUserObj = JSON.parse(rawU);
+    } catch (e) {}
+
+    const userName = currentSession.name || storedUserObj?.name || storedUserObj?.displayName || mailLower.split('@')[0];
+    const atelieNome = storedUserObj?.atelieName || `Ateliê de ${userName}`;
+    const newAtelie: Atelie = {
+      id: currentSession.uid || `user_${Date.now()}`,
+      nome: atelieNome,
+      emailOwner: mailLower,
+      telefone: '244923000000',
+      plano: 'basico',
+      ativo: true,
+      dataVencimento: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+      criadoEm: new Date().toISOString(),
+      pais: 'AO',
+      avatarIcon: 'scissors',
+    };
+    localDb.saveAtelie(newAtelie);
+    found = newAtelie;
+  }
+  return found;
+}
+
 export default function App() {
   const [session, setSession] = useState<UserSession | null>(() => customAuth.getCurrentUser());
   const [atelie, setAtelie] = useState<Atelie | null>(() => {
     const currentSession = customAuth.getCurrentUser();
-    if (currentSession && !currentSession.isAdmin) {
-      return localDb.getAtelies().find(a => a.emailOwner.toLowerCase() === currentSession.email.toLowerCase()) || null;
-    }
-    return null;
+    return getOrCreateUserAtelie(currentSession);
   });
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [bypassLanding, setBypassLanding] = useState(false);
@@ -146,6 +176,22 @@ export default function App() {
   // Toast & Custom Confirm Dialog States
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [confirmData, setConfirmData] = useState<ConfirmDialogData | null>(null);
+
+  // Fallback resilience: ensure an active atelie is always available for non-admin users
+  const effectiveAtelie = useMemo(() => {
+    if (session?.isAdmin) return null;
+    if (atelie) return atelie;
+    if (session) return getOrCreateUserAtelie(session);
+    return null;
+  }, [atelie, session]);
+
+  const atelieToUse = effectiveAtelie || atelie;
+
+  useEffect(() => {
+    if (!atelie && effectiveAtelie) {
+      setAtelie(effectiveAtelie);
+    }
+  }, [atelie, effectiveAtelie]);
 
   useEffect(() => {
     const handleToast = (e: Event) => {
@@ -268,6 +314,7 @@ export default function App() {
       const email = params.get('email');
       const role = params.get('role');
       const atelieName = params.get('name');
+      const displayNameParam = params.get('displayName');
 
       if (loginParam === 'success' || token) {
         if (token) {
@@ -278,12 +325,19 @@ export default function App() {
           const isAdmin = role === 'admin' || localDb.getAdmins().map(a => a.toLowerCase().trim()).includes(mailLower);
           localStorage.setItem('ateliepro_current_uid', uid);
           localStorage.setItem('ateliepro_current_email', mailLower);
+
+          const rawName = displayNameParam?.trim() || atelieName?.trim() || mailLower.split('@')[0];
+          const cleanName = rawName.startsWith('Ateliê de ') ? rawName.replace('Ateliê de ', '') : rawName;
+          const userAtelieName = atelieName || (isAdmin ? 'Administração Central' : `Ateliê de ${cleanName}`);
+
           const userData = {
             uid,
             email: mailLower,
+            name: isAdmin ? (localStorage.getItem('ateliepro_admin_nome') || 'Administrador') : cleanName,
+            displayName: cleanName,
             role: isAdmin ? 'admin' : 'atelie_owner',
             isAdmin,
-            atelieName: atelieName || (isAdmin ? 'Administração Central' : `Ateliê de ${mailLower.split('@')[0]}`),
+            atelieName: userAtelieName,
             authProvider: 'google',
           };
           localStorage.setItem('flowtailor_current_user', JSON.stringify(userData));
@@ -303,8 +357,8 @@ export default function App() {
     setSession(currentSession);
 
     if (currentSession && !currentSession.isAdmin) {
-      const tenantData = localDb.getAtelies().find(a => a.emailOwner.toLowerCase() === currentSession.email.toLowerCase());
-      setAtelie(tenantData || null);
+      const tenantData = getOrCreateUserAtelie(currentSession);
+      setAtelie(tenantData);
     } else {
       setAtelie(null);
     }
@@ -350,13 +404,13 @@ export default function App() {
   }
 
   // Check if tenant account is expired or inactive (except if administrators are logged in)
-  const isExpired = atelie ? (new Date(atelie.dataVencimento).getTime() < Date.now()) : false;
-  const isBlocked = atelie ? (!atelie.ativo || isExpired) : false;
+  const isExpired = atelieToUse ? (new Date(atelieToUse.dataVencimento).getTime() < Date.now()) : false;
+  const isBlocked = atelieToUse ? (!atelieToUse.ativo || isExpired) : false;
 
-  if (!session.isAdmin && isBlocked && atelie) {
+  if (!session.isAdmin && isBlocked && atelieToUse) {
     return (
       <RenovarView
-        atelie={atelie}
+        atelie={atelieToUse}
         onLogout={handleLogout}
         onRefresh={refreshSession}
       />
@@ -371,7 +425,8 @@ export default function App() {
         <Sidebar
           onLogout={handleLogout}
           isAdmin={session.isAdmin}
-          atelieName={atelie?.nome}
+          atelieName={atelieToUse?.nome}
+          userName={session.displayName || session.name}
           isOpenMobile={mobileMenuOpen}
           onCloseMobile={() => setMobileMenuOpen(false)}
           syncMode={localDb.getStorageMode()}
@@ -395,16 +450,20 @@ export default function App() {
 
                 <div className="flex items-center gap-1.5 min-w-0">
                   <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 hidden md:inline">Workspace:</span>
-                  <span className="text-xs font-bold text-atelier-900 sm:text-sm truncate">{session.isAdmin ? 'Painel de Controlo Admin' : (atelie?.nome || 'Meu Ateliê')}</span>
+                  <span className="text-xs font-bold text-atelier-900 sm:text-sm truncate">
+                    {session.isAdmin 
+                      ? 'Painel de Controlo Admin' 
+                      : (atelieToUse?.nome || (session.displayName ? `Ateliê de ${session.displayName}` : 'Meu Ateliê'))}
+                  </span>
                 </div>
               </div>
               
               <div className="flex items-center gap-3 md:gap-4 shrink-0 relative">
-                {atelie && (
+                {atelieToUse && (
                   <>
                     {/* Expiry date tag */}
                     <div className="bg-atelier-400 border border-atelier-300 px-2 py-0.5 sm:px-3 sm:py-1 rounded text-[10px] sm:text-[11px] text-atelier-700 font-bold shrink-0">
-                      <span className="hidden xs:inline">Vencença: </span>{new Date(atelie.dataVencimento).toLocaleDateString('pt-AO')}
+                      <span className="hidden xs:inline">Vencença: </span>{new Date(atelieToUse.dataVencimento).toLocaleDateString('pt-AO')}
                     </div>
 
                     {/* Notification Bell with Dropdown */}
@@ -533,13 +592,15 @@ export default function App() {
                 <div className="flex items-center gap-2">
                   <div className="text-right hidden sm:block">
                     <p className="text-xs font-semibold leading-none text-slate-700 truncate max-w-[120px]">
-                      {atelie ? atelie.nome : (localStorage.getItem('ateliepro_admin_nome') || 'Administrador Global')}
+                      {session.isAdmin 
+                        ? (localStorage.getItem('ateliepro_admin_nome') || 'Administrador') 
+                        : (session.displayName || session.name || (atelieToUse?.nome ? atelieToUse.nome.replace('Ateliê de ', '') : (session.email ? session.email.split('@')[0] : 'Costureira')))}
                     </p>
                     <p className="text-[10px] text-slate-400 mt-0.5 font-mono truncate max-w-[150px]">{session.email}</p>
                   </div>
                   <AtelieAvatar
-                    iconKey={atelie?.avatarIcon || localStorage.getItem('ateliepro_admin_avatar_icon') || 'scissors'}
-                    nome={atelie?.nome || localStorage.getItem('ateliepro_admin_nome') || 'Administrador Global'}
+                    iconKey={atelieToUse?.avatarIcon || (session.isAdmin ? (localStorage.getItem('ateliepro_admin_avatar_icon') || 'scissors') : 'scissors')}
+                    nome={session.isAdmin ? (localStorage.getItem('ateliepro_admin_nome') || 'Administrador') : (session.displayName || session.name || atelieToUse?.nome || 'Ateliê')}
                   />
                 </div>
               </div>
@@ -554,66 +615,71 @@ export default function App() {
                     <Route path="/configuracoes" element={<ConfiguracoesView atelie={null} onRefresh={refreshSession} />} />
                     <Route path="*" element={<Navigate to="/admin" replace />} />
                   </>
-                ) : (
+                ) : atelieToUse ? (
                   <>
                     {/* Standard Tailor Workstations Workspace */}
                     <Route path="/admin" element={<Navigate to="/dashboard" replace />} />
-                    <Route path="/dashboard" element={atelie && <DashboardView atelie={atelie} />} />
+                    <Route path="/dashboard" element={<DashboardView atelie={atelieToUse} />} />
                     <Route
                       path="/clientes"
                       element={
-                        atelie && (
-                          <ClientesView
-                            atelie={atelie}
-                            onNavigateToCreateOrder={(cliId) => {
-                              setPreselectedClientId(cliId);
-                              // Programmatic route push isn't strictly necessary since we can link states,
-                              // we navigate to /pedidos tab wrapper.
-                              window.location.href = '/pedidos';
-                            }}
-                          />
-                        )
+                        <ClientesView
+                          atelie={atelieToUse}
+                          onNavigateToCreateOrder={(cliId) => {
+                            setPreselectedClientId(cliId);
+                            // Programmatic route push isn't strictly necessary since we can link states,
+                            // we navigate to /pedidos tab wrapper.
+                            window.location.href = '/pedidos';
+                          }}
+                        />
                       }
                     />
                     <Route
                       path="/pedidos"
                       element={
-                        atelie && (
-                          <PedidosView
-                            atelie={atelie}
-                            preselectedClientId={preselectedClientId}
-                            onClearPreselect={() => setPreselectedClientId(null)}
-                          />
-                        )
+                        <PedidosView
+                          atelie={atelieToUse}
+                          preselectedClientId={preselectedClientId}
+                          onClearPreselect={() => setPreselectedClientId(null)}
+                        />
                       }
                     />
                     <Route 
                       path="/relatorios" 
                       element={
-                        atelie && (
-                          <RelatoriosView 
-                            atelie={atelie} 
-                          />
-                        )
+                        <RelatoriosView 
+                          atelie={atelieToUse} 
+                        />
                       } 
                     />
                     <Route 
                       path="/configuracoes" 
                       element={
-                        atelie && (
-                          <ConfiguracoesView 
-                            atelie={atelie} 
-                            onRefresh={refreshSession} 
-                            onNewAlertTriggered={(alert) => {
-                              setActiveAlert(alert);
-                              setNotifHistory(getAlertsHistory(atelie.id));
-                            }}
-                          />
-                        )
+                        <ConfiguracoesView 
+                          atelie={atelieToUse} 
+                          onRefresh={refreshSession} 
+                          onNewAlertTriggered={(alert) => {
+                            setActiveAlert(alert);
+                            setNotifHistory(getAlertsHistory(atelieToUse.id));
+                          }}
+                        />
                       } 
                     />
                     <Route path="*" element={<Navigate to="/dashboard" replace />} />
                   </>
+                ) : (
+                  <Route
+                    path="*"
+                    element={
+                      <div className="flex flex-col items-center justify-center min-h-[400px] text-center p-8 space-y-4">
+                        <div className="w-10 h-10 border-3 border-atelier-500 border-t-transparent rounded-full animate-spin" />
+                        <div>
+                          <h3 className="text-base font-semibold text-slate-800">A inicializar o seu Ateliê...</h3>
+                          <p className="text-xs text-slate-500 mt-1">A carregar os seus registos com segurança.</p>
+                        </div>
+                      </div>
+                    }
+                  />
                 )}
               </Routes>
 
@@ -1798,7 +1864,7 @@ interface NotificationSettingsCardProps {
 }
 
 function NotificationSettingsCard({ atelie, onNewAlertTriggered }: NotificationSettingsCardProps) {
-  const [settings, setSettings] = useState<NotificationSettings>(() => getNotificationSettings(atelie.id));
+  const [settings, setSettings] = useState<NotificationSettings>(() => getNotificationSettings(atelie?.id || ''));
   const [permissionState, setPermissionState] = useState<string>(() => {
     try {
       if (!('Notification' in window)) return 'unsupported';
@@ -2003,7 +2069,7 @@ function ConfiguracoesView({ atelie, onRefresh, onNewAlertTriggered }: Configura
   // If atelie is null, we are logged in as admin. We edit simple configs
   const [nome, setNome] = useState(() => {
     if (atelie) return atelie.nome;
-    return localStorage.getItem('ateliepro_admin_nome') || 'Administrador Global';
+    return localStorage.getItem('ateliepro_admin_nome') || 'Administrador';
   });
   const [telefone, setTelefone] = useState(() => {
     if (atelie) return atelie.telefone;

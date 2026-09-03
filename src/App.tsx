@@ -2215,17 +2215,11 @@ function ConfiguracoesView({ atelie, onRefresh, onNewAlertTriggered }: Configura
         const timeStr = new Date().toLocaleString('pt-AO');
         setLastSync(timeStr);
         localStorage.setItem('flowtailor_last_sync', timeStr);
-        setIsSyncing(false);
 
         if (result.success) {
-          const clientesList = localDb.getClientes(atelie.id);
-          const pedidosList = localDb.getPedidos(atelie.id);
-          const medidasList = localDb.getMedidas(atelie.id);
-          toast.success(`Sucesso! ${result.syncedItemsCount} registos sincronizados com o Neon PostgreSQL.`);
-          alert(`✅ [Sincronização Neon PostgreSQL Concluída]\n\nOs documentos foram persistidos com sucesso na base de dados relacional:\n• Ateliê: ${atelie.nome} (${atelie.id})\n• Clientes: ${clientesList.length} registos na tabela 'clientes'\n• Encomendas: ${pedidosList.length} registos na tabela 'encomendas'\n• Medidas: ${medidasList.length} registos na tabela 'medidas'`);
+          toast.success('Sincronização com o Neon DB concluída com sucesso!');
         } else {
-          toast.error(`Erro na sincronização: ${result.error}`);
-          alert(`❌ [Falha ao Gravar no Neon PostgreSQL]\n\nOcorreu um erro ao persistir as tabelas na base de dados:\n${result.error}`);
+          toast.error(`Erro na sincronização: ${result.error || 'Falha na comunicação'}`);
         }
       } else {
         const result = await localDb.forceSyncAdminToCloud((progress, msg) => {
@@ -2236,24 +2230,21 @@ function ConfiguracoesView({ atelie, onRefresh, onNewAlertTriggered }: Configura
         const timeStr = new Date().toLocaleString('pt-AO');
         setLastSync(timeStr);
         localStorage.setItem('flowtailor_last_sync', timeStr);
-        setIsSyncing(false);
 
         if (result.success) {
-          toast.success(`Sucesso! ${result.syncedItemsCount} registos administrativos gravados no Neon PostgreSQL.`);
-          alert(`✅ [Sincronização Administrativa Neon Concluída]\n\nTodos os documentos de administração foram persistidos com sucesso:\n• Ateliês Cadastrados: ${localDb.getAtelies().length} registos na tabela 'atelies'\n• Solicitações / Comprovativos: ${localDb.getSolicitacoes().length} registos na tabela 'solicitacoes_pagamento'\n• Parâmetros Bancários: gravados na tabela 'configuracoes'\n• Administradores: ${localDb.getAdmins().length} e-mails autorizados na tabela 'admins'`);
+          toast.success('Sincronização com o Neon DB concluída com sucesso!');
         } else {
-          toast.error(`Erro na sincronização administrativa: ${result.error}`);
-          alert(`❌ [Falha ao Gravar no Neon PostgreSQL]\n\nOcorreu um erro ao persistir dados administrativos:\n${result.error}`);
+          toast.error(`Erro na sincronização administrativa: ${result.error || 'Falha na comunicação'}`);
         }
       }
     } catch (err: any) {
       console.error('Falha na gravação com Neon PostgreSQL:', err);
+      const errorMessage = err?.message || err?.code || String(err);
+      toast.error(`Erro ao gravar no Neon: ${errorMessage}`);
+    } finally {
       setIsSyncing(false);
       setSyncProgress(0);
       setSyncStageMsg('');
-      const errorMessage = err?.message || err?.code || String(err);
-      toast.error(`Erro ao gravar no Neon: ${errorMessage}`);
-      alert(`❌ [Falha ao Gravar no Neon PostgreSQL]\n\nOcorreu um erro ao persistir as tabelas na base de dados:\n${errorMessage}`);
     }
   };
 
@@ -2600,14 +2591,39 @@ function ConfiguracoesView({ atelie, onRefresh, onNewAlertTriggered }: Configura
 
             {/* Sync Trigger button */}
             <div className="space-y-3">
-              {isSyncing ? (
-                <div className="space-y-2 pt-1">
+              <button
+                type="button"
+                onClick={handleManualSync}
+                disabled={isSyncing || (syncMode === 'offline_local' && !isOnline)}
+                className={`w-full py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all select-none shadow-sm ${
+                  isSyncing
+                    ? 'bg-atelier-800 text-slate-200 cursor-wait opacity-90'
+                    : syncMode === 'offline_local' && !isOnline
+                    ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
+                    : 'bg-atelier-900 hover:bg-atelier-950 text-white hover:scale-[1.01] active:scale-[0.99] duration-155 cursor-pointer'
+                }`}
+              >
+                {isSyncing ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-atelier-300" />
+                    <span>A sincronizar com a nuvem...</span>
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-pulse" />
+                    <span>Forçar Sincronização Manual</span>
+                  </>
+                )}
+              </button>
+
+              {isSyncing && (
+                <div className="space-y-2 pt-1 animate-in fade-in duration-200">
                   <div className="flex items-center justify-between text-[11px] font-semibold text-slate-700">
                     <span className="truncate max-w-[80%] flex items-center gap-1.5">
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin text-atelier-500" />
+                      <span className="w-1.5 h-1.5 rounded-full bg-atelier-500 animate-ping"></span>
                       {syncStageMsg}
                     </span>
-                    <span className="font-mono">{syncProgress}%</span>
+                    <span className="font-mono text-atelier-700 font-bold">{syncProgress}%</span>
                   </div>
                   {/* Visual Progress bar */}
                   <div className="w-full h-1.5 bg-slate-200 rounded-full overflow-hidden">
@@ -2617,21 +2633,8 @@ function ConfiguracoesView({ atelie, onRefresh, onNewAlertTriggered }: Configura
                     ></div>
                   </div>
                 </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={handleManualSync}
-                  disabled={syncMode === 'offline_local' && !isOnline}
-                  className={`w-full py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all select-none shadow-sm cursor-pointer ${
-                    syncMode === 'offline_local' && !isOnline
-                      ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
-                      : 'bg-atelier-900 hover:bg-atelier-950 text-white hover:scale-[1.01] active:scale-[0.99] duration-155'
-                  }`}
-                >
-                  <RefreshCw className="w-3.5 h-3.5 animate-pulse" />
-                  Forçar Sincronização Manual
-                </button>
               )}
+
               <p className="text-[10px] text-center text-slate-400 select-none leading-relaxed">
                 O FlowTailor armazena as faturas localmente e propaga os dados na nuvem de forma resiliente.
               </p>

@@ -323,16 +323,13 @@ export default function AdminView({ onRefreshAtelieSession }: AdminViewProps) {
       });
 
       if (result.success) {
-        showToast(`Sucesso! ${result.syncedItemsCount} registos administrativos sincronizados com o Neon PostgreSQL.`, 'success');
-        alert(`✅ [Sincronização Administrativa Neon Concluída]\n\nOs registos relacionais foram persistidos com sucesso no Neon PostgreSQL:\n• Ateliês da Plataforma: ${atelies.length} registos na tabela 'atelies'\n• Solicitações / Comprovativos: ${solicitacoes.length} registos na tabela 'solicitacoes_pagamento'\n• Parâmetros Bancários: gravados na tabela 'configuracoes'\n• Administradores: ${adminsList.length} autorizados na tabela 'admins'`);
+        showToast('Sincronização com o Neon DB concluída com sucesso!', 'success');
       } else {
-        showToast(`Erro na sincronização: ${result.error}`, 'error');
-        alert(`❌ [Falha ao Gravar no Neon PostgreSQL]\n\nOcorreu um erro ao persistir dados administrativos:\n${result.error}`);
+        showToast(`Erro na sincronização: ${result.error || 'Falha na comunicação'}`, 'error');
       }
     } catch (err: any) {
       console.error(err);
-      showToast('Falha na sincronização administrativa com Neon.', 'error');
-      alert(`❌ Erro: ${err?.message || err}`);
+      showToast(`Falha na sincronização administrativa com Neon: ${err?.message || err}`, 'error');
     } finally {
       setIsSyncingAdmin(false);
       setSyncProgress(0);

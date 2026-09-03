@@ -1,5 +1,5 @@
 import { Atelie, Cliente, Medidas, Pedido, SolicitacaoPagamento, ConfiguracaoPagamento, UserSession } from '../types';
-import { idbSave, idbSaveBulk, idbGetAll, idbDelete } from './indexedDb';
+import { idbSave, idbSaveBulk, idbGetAll, idbDelete, idbClearAll } from './indexedDb';
 
 // ==============================================================================
 // NEON AUTHENTICATION CONFIGURATION (Project: flowtailor-db)
@@ -1210,10 +1210,18 @@ class NeonDatabaseManager {
 
       let response: Response;
       try {
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('jwt_token') : null;
+        const currentEmail = typeof localStorage !== 'undefined' ? localStorage.getItem('ateliepro_current_email') : null;
+
         response = await fetch('/api/neon/sync-admin', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 
+            'Content-Type': 'application/json',
+            ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+            ...(currentEmail ? { 'x-admin-email': currentEmail } : {}),
+          },
           body: JSON.stringify({
+            adminEmail: currentEmail,
             atelies,
             solicitacoes,
             configs,
@@ -1227,7 +1235,24 @@ class NeonDatabaseManager {
         return { success: false, syncedItemsCount: totalCount, error: networkErr?.message || 'Falha de rede' };
       }
 
-      const responseData = await response.json().catch(() => null);
+      // 1. Ler o status da resposta antes de tentar parsear o JSON
+      if (response.status === 500 || response.status === 404) {
+        console.warn(`[Neon Admin Sync] Servidor retornou HTTP ${response.status}. A efetuar fallback para IndexedDB local.`);
+        this.scheduleSilentRetry();
+        onProgress?.(100, `Servidor retornou HTTP ${response.status}. Registos preservados com segurança no IndexedDB local.`);
+        return {
+          success: false,
+          syncedItemsCount: totalCount,
+          error: `Erro de sincronização no servidor (HTTP ${response.status}). Registos mantidos no IndexedDB local.`,
+        };
+      }
+
+      let responseData: any = null;
+      try {
+        responseData = await response.json();
+      } catch (jsonErr) {
+        console.warn('[Neon Admin Sync] Resposta não-JSON recebida:', jsonErr);
+      }
 
       if (!response.ok || (responseData && responseData.success === false)) {
         const errorMsg = responseData?.message || responseData?.details || responseData?.error || `Erro de sincronização HTTP ${response.status}`;
@@ -1398,6 +1423,56 @@ export class CustomAuthService {
     this.listeners.forEach(l => l(this.currentSession));
   }
 
+  private async safeSyncSession(body: {
+    email: string;
+    displayName?: string;
+    uid?: string;
+    authProvider?: string;
+    password?: string;
+  }): Promise<{ success: boolean; isAdmin?: boolean; role?: string; data?: any }> {
+    try {
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('jwt_token') : null;
+      const response = await fetch('/api/auth/neon/sync-session', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify(body),
+      });
+
+      // Ler o status da resposta antes de tentar parsear o JSON
+      if (response.status === 500 || response.status === 404) {
+        console.warn(`[Neon Sync Session] Servidor retornou HTTP ${response.status}. A utilizar fallback local.`);
+        return { success: false };
+      }
+
+      let resData: any = null;
+      try {
+        resData = await response.json();
+      } catch (parseErr) {
+        console.warn('[Neon Sync Session] Resposta não-JSON:', parseErr);
+        return { success: false };
+      }
+
+      if (response.ok && resData && resData.success !== false) {
+        if (resData.accessToken && typeof localStorage !== 'undefined') {
+          localStorage.setItem('jwt_token', resData.accessToken);
+        }
+        return {
+          success: true,
+          isAdmin: Boolean(resData.isAdmin),
+          role: resData.role || (resData.isAdmin ? 'admin' : 'atelie_owner'),
+          data: resData,
+        };
+      }
+      return { success: false };
+    } catch (e) {
+      console.warn('[Neon Sync Session Network Error]:', e);
+      return { success: false };
+    }
+  }
+
   getCurrentUser(): UserSession | null {
     this.restoreSession();
     return this.currentSession;
@@ -1420,28 +1495,17 @@ export class CustomAuthService {
       let backendAdmin = false;
       let backendRole: 'admin' | 'atelie_owner' = 'atelie_owner';
       
-      try {
-        const syncResponse = await fetch('/api/auth/neon/sync-session', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email: mailLower,
-            displayName: userName,
-            authProvider: 'google_oauth',
-          }),
-        });
+      const syncResult = await this.safeSyncSession({
+        email: mailLower,
+        displayName: userName,
+        authProvider: 'google_oauth',
+      });
 
-        if (syncResponse.ok) {
-          const syncData = await syncResponse.json();
-          backendAdmin = Boolean(syncData.isAdmin && syncData.role === 'admin');
-          backendRole = backendAdmin ? 'admin' : 'atelie_owner';
-        } else {
-          // Fallback seguro: verifica na lista local sincronizada
-          backendAdmin = localDb.getAdmins().map(a => a.toLowerCase().trim()).includes(mailLower);
-          backendRole = backendAdmin ? 'admin' : 'atelie_owner';
-        }
-      } catch (syncErr) {
-        console.warn('[Neon Auth Sync Session Warning]:', syncErr);
+      if (syncResult.success) {
+        backendAdmin = Boolean(syncResult.isAdmin);
+        backendRole = (syncResult.role as any) || (backendAdmin ? 'admin' : 'atelie_owner');
+      } else {
+        // Fallback seguro: verifica na lista local sincronizada
         backendAdmin = localDb.getAdmins().map(a => a.toLowerCase().trim()).includes(mailLower);
         backendRole = backendAdmin ? 'admin' : 'atelie_owner';
       }
@@ -1542,21 +1606,13 @@ export class CustomAuthService {
       atelie: newAtelie
     };
 
-    try {
-      await fetch('/api/auth/neon/sync-session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: mailLower,
-          displayName: nomeAtelie,
-          uid,
-          authProvider: 'email_neon',
-          password: password || undefined,
-        }),
-      });
-    } catch (e) {
-      console.warn('[Neon Sign-up sync]:', e);
-    }
+    await this.safeSyncSession({
+      email: mailLower,
+      displayName: nomeAtelie,
+      uid,
+      authProvider: 'email_neon',
+      password: password || undefined,
+    });
 
     localDb.initRealtimeSync(uid);
     this.notify();
@@ -1593,20 +1649,12 @@ export class CustomAuthService {
     };
     localDb.initAdminRealtimeSync();
 
-    try {
-      await fetch('/api/auth/neon/sync-session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: mailLower,
-          displayName: 'Administrador FlowTailor',
-          uid,
-          authProvider: 'email_neon',
-        }),
-      });
-    } catch (e) {
-      console.warn('[Neon Admin login sync]:', e);
-    }
+    await this.safeSyncSession({
+      email: mailLower,
+      displayName: 'Administrador FlowTailor',
+      uid,
+      authProvider: 'email_neon',
+    });
 
     this.notify();
     return this.currentSession;
@@ -1774,20 +1822,12 @@ export class CustomAuthService {
       };
       localDb.initAdminRealtimeSync();
 
-      try {
-        await fetch('/api/auth/neon/sync-session', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email: mailLower,
-            displayName: 'Administrador FlowTailor',
-            uid,
-            authProvider: 'email_neon',
-          }),
-        });
-      } catch (e) {
-        console.warn('[Neon Admin login sync]:', e);
-      }
+      await this.safeSyncSession({
+        email: mailLower,
+        displayName: 'Administrador FlowTailor',
+        uid,
+        authProvider: 'email_neon',
+      });
 
       this.notify();
       return this.currentSession;
@@ -1808,20 +1848,12 @@ export class CustomAuthService {
       };
       localDb.initRealtimeSync(atelie.id);
       
-      try {
-        await fetch('/api/auth/neon/sync-session', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email: mailLower,
-            displayName: atelie.nome,
-            uid: atelie.id,
-            authProvider: 'email_neon',
-          }),
-        });
-      } catch (e) {
-        console.warn('[Neon Login sync]:', e);
-      }
+      await this.safeSyncSession({
+        email: mailLower,
+        displayName: atelie.nome,
+        uid: atelie.id,
+        authProvider: 'email_neon',
+      });
 
       this.notify();
       return this.currentSession;
@@ -1850,20 +1882,12 @@ export class CustomAuthService {
       };
       localDb.initRealtimeSync(uid);
 
-      try {
-        await fetch('/api/auth/neon/sync-session', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email: mailLower,
-            displayName: newAtelie.nome,
-            uid,
-            authProvider: 'email_neon',
-          }),
-        });
-      } catch (e) {
-        console.warn('[Neon New Atelie sync]:', e);
-      }
+      await this.safeSyncSession({
+        email: mailLower,
+        displayName: newAtelie.nome,
+        uid,
+        authProvider: 'email_neon',
+      });
 
       this.notify();
       return this.currentSession;
@@ -1872,11 +1896,39 @@ export class CustomAuthService {
 
   async logout() {
     try {
-      await fetch('/api/auth/logout', { method: 'POST' });
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('jwt_token') : null;
+      const response = await fetch('/api/auth/logout', { 
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({ token })
+      });
+
+      // 1. Ler o status da resposta antes de tentar parsear o JSON
+      if (response.status === 500 || response.status === 404) {
+        console.warn(`[Logout] Servidor retornou HTTP ${response.status}. A efetuar fallback limpo no IndexedDB...`);
+      } else if (response.ok) {
+        try {
+          const resData = await response.json();
+          console.log('[Logout] Servidor:', resData?.message || 'Sessão encerrada');
+        } catch {
+          // Ignora se o corpo da resposta não for JSON
+        }
+      }
     } catch (e) {
-      console.warn('Neon Logout failed:', e);
+      console.warn('[Logout Network Exception - Fallback limpo iniciado]:', e);
     }
-    localDb.stopRealtimeSync();
+
+    // 2. Fallback limpo: limpar o estado local no IndexedDB e reencaminhar o utilizador para a tela de login
+    try {
+      localDb.stopRealtimeSync();
+      await idbClearAll();
+    } catch (idbErr) {
+      console.warn('[Logout] Aviso ao limpar IndexedDB:', idbErr);
+    }
+
     if (typeof localStorage !== 'undefined') {
       localStorage.removeItem('ateliepro_current_uid');
       localStorage.removeItem('ateliepro_current_email');
@@ -1884,9 +1936,21 @@ export class CustomAuthService {
       localStorage.removeItem('ateliepro_user_credentials');
       localStorage.removeItem('jwt_token');
       localStorage.removeItem('refresh_token');
+      localStorage.removeItem('flowtailor_session');
+    }
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.clear();
     }
     this.currentSession = null;
     this.notify();
+
+    // Reencaminhar o utilizador para a tela de login
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('flowtailor:logout'));
+      if (window.location.pathname !== '/' || window.location.hash !== '') {
+        window.location.href = '/';
+      }
+    }
   }
 }
 

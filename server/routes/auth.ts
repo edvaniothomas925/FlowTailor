@@ -10,7 +10,7 @@ import {
   UserJwtPayload,
 } from '../services/jwtService.js';
 import { hashPassword, comparePassword } from '../services/passwordService.js';
-import { requireAuth } from '../middleware/authJwt.js';
+import { requireAuth, extractToken } from '../middleware/authJwt.js';
 import { validateBody } from '../middleware/zodValidator.js';
 import {
   authLoginSchema,
@@ -24,7 +24,7 @@ import {
 } from '../schemas/zodSchemas.js';
 import { createRateLimiter } from '../middleware/rateLimiter.js';
 import { logSecurityEvent } from '../services/auditLogger.js';
-import { isAuthorizedAdminEmail } from '../db/index.js';
+import { isAuthorizedAdminEmail, getDatabaseUrl, INITIAL_AUTHORIZED_ADMINS } from '../db/index.js';
 
 const router = Router();
 
@@ -306,21 +306,45 @@ router.post(
 );
 
 /**
- * 6. Logout endpoint - Clears HttpOnly Cookie and Revokes Active Refresh Token
+ * 6. Logout endpoint - Clears session cookies and revokes active tokens
+ * Always responds with 200 { success: true, message: "Sessão encerrada" }
  */
-router.post('/logout', (req: Request, res: Response) => {
-  const token = req.cookies?.[REFRESH_COOKIE_NAME] || req.body?.token;
-  if (token) {
-    revokeRefreshToken(token);
+router.post(['/logout', '/auth/logout'], (req: Request, res: Response) => {
+  try {
+    const token = req.cookies?.[REFRESH_COOKIE_NAME] || req.body?.token;
+    if (token && typeof token === 'string') {
+      try {
+        revokeRefreshToken(token);
+      } catch (revErr) {
+        console.warn('[Logout] Aviso não-bloqueante ao revogar refresh token:', revErr);
+      }
+    }
+
+    // Limpar os cookies da sessão conforme solicitado
+    res.clearCookie('session', { path: '/' });
+    res.clearCookie(REFRESH_COOKIE_NAME, { path: '/api/auth' });
+    res.clearCookie(REFRESH_COOKIE_NAME, { path: '/' });
+    res.clearCookie('jwt_token', { path: '/' });
+    res.clearCookie('flowtailor_session', { path: '/' });
+    res.clearCookie('refreshToken', { path: '/' });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Sessão encerrada',
+    });
+  } catch (err: any) {
+    console.error('[Logout] Erro inesperado ao encerrar sessão:', err);
+    try {
+      res.clearCookie('session', { path: '/' });
+      res.clearCookie(REFRESH_COOKIE_NAME, { path: '/api/auth' });
+      res.clearCookie('jwt_token', { path: '/' });
+    } catch {}
+
+    return res.status(200).json({
+      success: true,
+      message: 'Sessão encerrada',
+    });
   }
-
-  res.clearCookie(REFRESH_COOKIE_NAME, { path: '/api/auth' });
-  res.clearCookie('jwt_token', { path: '/' });
-
-  res.json({
-    success: true,
-    message: 'Sessão terminada e tokens revogados com sucesso.',
-  });
 });
 
 /**
@@ -758,54 +782,100 @@ router.post('/google/verify-credential', async (req: Request, res: Response) => 
  * 6.6. Sync Session from Neon Auth / Google OAuth to FlowTailor JWT
  * Strictly verifies admin role against database/whitelist
  */
-router.post('/neon/sync-session', async (req: Request, res: Response) => {
-  const { email, displayName, uid, authProvider = 'google_neon' } = req.body;
-  if (!email) {
-    return res.status(400).json({ success: false, error: 'Email é obrigatório para sincronização de sessão.' });
+router.post(['/neon/sync-session', '/sync-session'], async (req: Request, res: Response) => {
+  try {
+    const { email, displayName, uid, authProvider = 'google_neon' } = req.body || {};
+
+    // 1. Validação de autenticação: verifica token existente ou email de sessão válido
+    const token = extractToken(req);
+    let tokenVerifiedUser: UserJwtPayload | null = null;
+    if (token) {
+      const v = verifyJwtToken(token);
+      if (v.valid && v.payload) {
+        tokenVerifiedUser = v.payload;
+      }
+    }
+
+    const candidateEmail = tokenVerifiedUser?.email || email;
+    if (!candidateEmail || typeof candidateEmail !== 'string' || !candidateEmail.includes('@')) {
+      return res.status(401).json({
+        success: false,
+        message: 'Erro de sincronização',
+        error: 'Utilizador não autenticado. Forneça uma sessão ou email de utilizador válido.',
+      });
+    }
+
+    const mailLower = candidateEmail.toLowerCase().trim();
+
+    // 2. Validação da presença da variável de ambiente DATABASE_URL antes de consultar o Neon DB
+    const dbUrl = getDatabaseUrl();
+    let isAdmin = INITIAL_AUTHORIZED_ADMINS.includes(mailLower);
+
+    if (dbUrl) {
+      try {
+        isAdmin = await isAuthorizedAdminEmail(mailLower);
+      } catch (sqlErr: any) {
+        console.error('[Neon sync-session] Erro de SQL/rede ao verificar administrador no Neon DB:', sqlErr);
+        // Fallback resiliente para a lista estática
+        isAdmin = INITIAL_AUTHORIZED_ADMINS.includes(mailLower);
+      }
+    } else {
+      console.warn('[Neon sync-session] DATABASE_URL não configurada; a utilizar lista autorizada estática.');
+    }
+
+    const userId = uid || (isAdmin ? `admin_${mailLower.split('@')[0]}` : `user_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`);
+    const userDisplayName = displayName?.trim() || mailLower.split('@')[0];
+
+    const payload: UserJwtPayload = {
+      userId,
+      email: mailLower,
+      name: isAdmin ? (userDisplayName || 'Administrador') : userDisplayName,
+      displayName: userDisplayName,
+      role: isAdmin ? 'admin' : 'atelie_owner',
+      atelieName: displayName ? `Ateliê de ${displayName}` : (isAdmin ? 'Administração Central' : `Ateliê de ${mailLower.split('@')[0]}`),
+      authProvider,
+      sessionCreated: new Date().toISOString(),
+    };
+
+    const tokens = generateTokenPair(payload);
+    try {
+      res.cookie(REFRESH_COOKIE_NAME, tokens.refreshToken, getRefreshCookieOptions());
+    } catch (cookieErr) {
+      console.warn('[Neon sync-session] Aviso ao definir cookie de refresh:', cookieErr);
+    }
+
+    const forwarded = req.headers['x-forwarded-for'];
+    const ip = (typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : req.socket.remoteAddress) || '127.0.0.1';
+
+    try {
+      logSecurityEvent({
+        type: 'AUTH_SUCCESS',
+        severity: 'INFO',
+        ip,
+        path: req.originalUrl,
+        method: req.method,
+        details: `Google/Neon OAuth session synced for ${mailLower} (Role: ${payload.role}, IsAdmin: ${isAdmin})`,
+      });
+    } catch {}
+
+    return res.status(200).json({
+      success: true,
+      message: 'Sessão sincronizada com sucesso.',
+      accessToken: tokens.accessToken,
+      tokenType: tokens.tokenType,
+      expiresIn: tokens.expiresIn,
+      user: payload,
+      isAdmin,
+      role: payload.role,
+    });
+  } catch (err: any) {
+    console.error('[Neon sync-session] Erro unhandled de sincronização:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Erro de sincronização',
+      error: err?.message || 'Falha interna ao processar sincronização de sessão',
+    });
   }
-
-  const mailLower = String(email).toLowerCase().trim();
-  const isAdmin = await isAuthorizedAdminEmail(mailLower);
-  
-  const userId = uid || (isAdmin ? `admin_${mailLower.split('@')[0]}` : `user_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`);
-  const userDisplayName = displayName?.trim() || mailLower.split('@')[0];
-
-  const payload: UserJwtPayload = {
-    userId,
-    email: mailLower,
-    name: isAdmin ? (userDisplayName || 'Administrador') : userDisplayName,
-    displayName: userDisplayName,
-    role: isAdmin ? 'admin' : 'atelie_owner',
-    atelieName: displayName ? `Ateliê de ${displayName}` : (isAdmin ? 'Administração Central' : `Ateliê de ${mailLower.split('@')[0]}`),
-    authProvider,
-    sessionCreated: new Date().toISOString(),
-  };
-
-  const tokens = generateTokenPair(payload);
-  res.cookie(REFRESH_COOKIE_NAME, tokens.refreshToken, getRefreshCookieOptions());
-
-  const forwarded = req.headers['x-forwarded-for'];
-  const ip = (typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : req.socket.remoteAddress) || '127.0.0.1';
-
-  logSecurityEvent({
-    type: 'AUTH_SUCCESS',
-    severity: 'INFO',
-    ip,
-    path: req.originalUrl,
-    method: req.method,
-    details: `Google/Neon OAuth session synced for ${mailLower} (Role: ${payload.role}, IsAdmin: ${isAdmin})`,
-  });
-
-  res.json({
-    success: true,
-    message: 'Sessão sincronizada com sucesso.',
-    accessToken: tokens.accessToken,
-    tokenType: tokens.tokenType,
-    expiresIn: tokens.expiresIn,
-    user: payload,
-    isAdmin,
-    role: payload.role,
-  });
 });
 
 /**

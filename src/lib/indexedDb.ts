@@ -161,3 +161,28 @@ export async function idbDelete(storeName: string, id: string): Promise<void> {
     console.warn(`[IndexedDB Delete Error in ${storeName}]:`, err);
   }
 }
+
+/**
+ * Clears all object stores in the IndexedDB database (used on clean logout or fallback)
+ */
+export async function idbClearAll(): Promise<void> {
+  try {
+    const db = await getIndexedDB();
+    const storeNames = Array.from(db.objectStoreNames);
+    if (storeNames.length === 0) return;
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(storeNames, 'readwrite');
+      storeNames.forEach(name => {
+        try {
+          tx.objectStore(name).clear();
+        } catch (storeErr) {
+          console.warn(`[IndexedDB Clear Store Warning - ${name}]:`, storeErr);
+        }
+      });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (err) {
+    console.warn('[IndexedDB Clear Error]:', err);
+  }
+}

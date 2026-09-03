@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { eq, and, desc } from 'drizzle-orm';
-import { getDb, getSql, getDatabaseUrl, ensureTablesExist } from '../db/index.js';
+import { getDb, getSql, getDatabaseUrl, ensureTablesExist, INITIAL_AUTHORIZED_ADMINS, isAuthorizedAdminEmail } from '../db/index.js';
 import { 
   atelies, 
   clientes, 
@@ -11,6 +11,8 @@ import {
   admins 
 } from '../db/schema.js';
 import { hashPassword, comparePassword } from '../services/passwordService.js';
+import { extractToken } from '../middleware/authJwt.js';
+import { verifyJwtToken } from '../services/jwtService.js';
 
 const router = Router();
 
@@ -1311,8 +1313,54 @@ router.post(['/neon/sync-atelie', '/sync-atelie'], checkDbAvailable, async (req:
 // ==============================================================================
 // 9. BATCH SYNC ADMIN: Sincronização em massa de dados de Administração
 // ==============================================================================
-router.post(['/neon/sync-admin', '/sync-admin'], checkDbAvailable, async (req: Request, res: Response) => {
+router.post(['/neon/sync-admin', '/sync-admin'], async (req: Request, res: Response) => {
   try {
+    // 1. Validação de autenticação: verifica se o utilizador está autenticado como admin
+    const token = extractToken(req);
+    let isAuthenticated = false;
+    let authUserEmail = '';
+
+    if (token) {
+      const v = verifyJwtToken(token);
+      if (v.valid && v.payload) {
+        isAuthenticated = true;
+        authUserEmail = v.payload.email || '';
+      }
+    }
+
+    const candidateEmail = (
+      req.body?.adminEmail ||
+      req.headers['x-admin-email'] ||
+      (Array.isArray(req.body?.admins) && req.body.admins[0]) ||
+      authUserEmail
+    );
+
+    if (!isAuthenticated && candidateEmail && typeof candidateEmail === 'string') {
+      const mailLower = candidateEmail.toLowerCase().trim();
+      if (INITIAL_AUTHORIZED_ADMINS.includes(mailLower) || (getDatabaseUrl() && await isAuthorizedAdminEmail(mailLower).catch(() => false))) {
+        isAuthenticated = true;
+      }
+    }
+
+    if (!isAuthenticated) {
+      return res.status(401).json({
+        success: false,
+        message: 'Erro de sincronização',
+        error: 'Utilizador não autenticado. Operação administrativa requer autenticação prévia.',
+      });
+    }
+
+    // 2. Validação da presença da variável de ambiente DATABASE_URL antes de executar consultas SQL
+    const dbUrl = getDatabaseUrl();
+    if (!dbUrl) {
+      console.error('[Neon sync-admin] DATABASE_URL não configurada no ambiente.');
+      return res.status(400).json({
+        success: false,
+        message: 'Erro de sincronização',
+        error: 'Variável de ambiente DATABASE_URL não configurada no servidor.',
+      });
+    }
+
     await ensureTablesExist().catch((tableErr) => {
       console.warn('[Neon sync-admin] AutoMigration notice:', tableErr);
     });
@@ -1467,11 +1515,11 @@ router.post(['/neon/sync-admin', '/sync-admin'], checkDbAvailable, async (req: R
       message: 'Dados administrativos gravados com sucesso no Neon PostgreSQL.',
     });
   } catch (err: any) {
-    console.error('Sync error (admin):', err);
+    console.error('[Neon sync-admin] Erro de rede/SQL durante sincronização:', err);
     return res.status(500).json({
       success: false,
-      message: "Falha ao sincronizar dados de administração",
-      details: err?.message || String(err),
+      message: 'Erro de sincronização',
+      error: err?.message || 'Falha ao sincronizar dados de administração no Neon DB',
     });
   }
 });

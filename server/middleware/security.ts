@@ -99,6 +99,12 @@ export function csrfProtection(req: Request, res: Response, next: NextFunction) 
     return next();
   }
 
+  // Logout is idempotent and state-clearing, always allow without CSRF rejection
+  const cleanPath = (req.originalUrl || req.url || req.path).split('?')[0];
+  if (cleanPath.endsWith('/logout')) {
+    return next();
+  }
+
   const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
 
   // If no origin header is present on internal/server-to-server calls, allow

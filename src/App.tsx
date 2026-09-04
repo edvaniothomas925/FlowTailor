@@ -1033,41 +1033,62 @@ function AuthScreen({ onLoginSuccess, initialTab = 'login', onBackToLanding, ini
     }
   };
 
+  const [isSubmittingLogin, setIsSubmittingLogin] = useState(false);
+
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMess('');
 
     const mailLower = email.toLowerCase().trim();
-    const isAdmin = localDb.getAdmins().includes(mailLower);
-
-    // Se for administrador e ainda não tem senha configurada (1º dia de acesso)
-    if (isAdmin && !localDb.hasAdminPassword(mailLower)) {
-      if (senha && senha.length >= 6) {
-        try {
-          await customAuth.login(mailLower, senha);
-          toast.success('🛡️ Palavra-passe de Administrador definida com sucesso no seu 1º acesso!');
-          onLoginSuccess();
-          return;
-        } catch (err: any) {
-          setErrorMess(err.message || 'Falha ao autenticar administrador.');
-          return;
-        }
-      } else {
-        // Abre o fluxo dedicado de configuração de palavra-passe no primeiro dia
-        setAdminFirstSetup({ email: mailLower });
-        return;
-      }
+    if (!mailLower || !mailLower.includes('@')) {
+      setErrorMess('Por favor, introduza um e-mail válido.');
+      return;
     }
 
+    if (!senha) {
+      setErrorMess('Por favor, introduza a sua palavra-passe.');
+      return;
+    }
+
+    setIsSubmittingLogin(true);
     try {
-      await customAuth.login(email, senha);
+      // 1. Enviar requisição POST para /api/auth/login
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          email: mailLower,
+          password: senha,
+        }),
+      });
+
+      let data: any = null;
+      try {
+        data = await res.json();
+      } catch (pErr) {
+        console.warn('Erro ao processar JSON de login:', pErr);
+      }
+
+      // Se a API responder com status de erro (ex: 401 ou 400), impede o redirecionamento
+      if (!res.ok || !data || data.success === false) {
+        const errorMsg = 'E-mail ou palavra-passe inválidos.';
+        setErrorMess(errorMsg);
+        toast.error(errorMsg);
+        return;
+      }
+
+      // 2. Apenas se a autenticação for válida, conclui a sessão local e redireciona
+      await customAuth.login(mailLower, senha);
+      toast.success('Sessão iniciada com sucesso!');
       onLoginSuccess();
     } catch (err: any) {
-      if (err?.isFirstAdminAccess) {
-        setAdminFirstSetup({ email: err.adminEmail || mailLower });
-      } else {
-        setErrorMess(err.message || 'Erro inesperado.');
-      }
+      const errorMsg = 'E-mail ou palavra-passe inválidos.';
+      setErrorMess(errorMsg);
+      toast.error(errorMsg);
+    } finally {
+      setIsSubmittingLogin(false);
     }
   };
 
@@ -1654,9 +1675,17 @@ function AuthScreen({ onLoginSuccess, initialTab = 'login', onBackToLanding, ini
               <div className="pt-2">
                 <button
                   type="submit"
-                  className="w-full py-3 bg-atelier-700 hover:bg-atelier-850 text-white font-bold text-sm rounded-xl transition-all shadow-md shadow-atelier-750/15"
+                  disabled={isSubmittingLogin}
+                  className="w-full py-3 bg-atelier-700 hover:bg-atelier-850 text-white font-bold text-sm rounded-xl transition-all shadow-md shadow-atelier-750/15 cursor-pointer disabled:opacity-60 flex items-center justify-center gap-2"
                 >
-                  Confirmar Acesso ao Ateliê
+                  {isSubmittingLogin ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>A validar credenciais...</span>
+                    </>
+                  ) : (
+                    'Confirmar Acesso ao Ateliê'
+                  )}
                 </button>
               </div>
 

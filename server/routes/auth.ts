@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { Router, Request, Response, CookieOptions } from 'express';
 import { env } from '../config/env.js';
 import {
@@ -24,7 +25,9 @@ import {
 } from '../schemas/zodSchemas.js';
 import { createRateLimiter } from '../middleware/rateLimiter.js';
 import { logSecurityEvent } from '../services/auditLogger.js';
-import { isAuthorizedAdminEmail, getDatabaseUrl, INITIAL_AUTHORIZED_ADMINS } from '../db/index.js';
+import { isAuthorizedAdminEmail, getDatabaseUrl, getDb, getSql, INITIAL_AUTHORIZED_ADMINS } from '../db/index.js';
+import { usuarios, admins, atelies } from '../db/schema.js';
+import { eq } from 'drizzle-orm';
 
 const router = Router();
 
@@ -54,31 +57,162 @@ router.use(authRateLimiter);
 
 /**
  * 1. Login with credentials or PIN (Validated via Zod authLoginSchema)
- * Sets the Refresh Token in an HttpOnly, Secure, SameSite=Strict cookie
+ * Queries the user table in Neon DB by email, validates password against senha_hash using bcrypt.compare,
+ * and only on success issues session/cookie.
  */
 router.post(
   '/login',
   validateBody(authLoginSchema),
   async (req: Request, res: Response) => {
-    const { email, role: requestedRole, atelieId, atelieName, authProvider } = req.body as AuthLoginInput;
-    const mailLower = email.toLowerCase().trim();
-    
-    // Strict verification: only grant 'admin' role if email is authorized in database/whitelist
-    const isAllowedAdmin = await isAuthorizedAdminEmail(mailLower);
-    const effectiveRole = isAllowedAdmin 
-      ? 'admin' 
-      : (requestedRole === 'admin' ? 'atelie_owner' : (requestedRole || 'atelie_owner'));
+    const forwarded = req.headers['x-forwarded-for'];
+    const ip = (typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : req.socket.remoteAddress) || '127.0.0.1';
 
-    const userId = isAllowedAdmin 
-      ? `admin_${mailLower.split('@')[0]}` 
-      : `user_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`;
+    const { email, password, pin, role: requestedRole, atelieId, atelieName, authProvider } = req.body as AuthLoginInput;
+    const mailLower = email.toLowerCase().trim();
+    const candidateSecret = (password || pin || '').trim();
+
+    // 1. Palavra-passe ou PIN é obrigatório
+    if (!candidateSecret) {
+      logSecurityEvent({
+        type: 'AUTH_FAILURE',
+        severity: 'WARN',
+        ip,
+        path: req.originalUrl,
+        method: req.method,
+        details: `Tentativa de login sem senha para: ${mailLower}`,
+      });
+      return res.status(401).json({
+        success: false,
+        message: 'E-mail ou palavra-passe incorretos.',
+      });
+    }
+
+    // 2. Consultar a tabela de utilizadores no Neon DB pelo e-mail fornecido
+    let userRecord: {
+      id: string;
+      email: string;
+      nome?: string | null;
+      senha_hash: string;
+      role: string;
+      atelie_id?: string | null;
+    } | null = null;
+
+    const dbUrl = getDatabaseUrl();
+    if (dbUrl) {
+      try {
+        const db = getDb();
+
+        // 2.1 Consulta na tabela 'usuarios'
+        try {
+          const userRows = await db.select().from(usuarios).where(eq(usuarios.email, mailLower));
+          if (userRows.length > 0 && userRows[0].senha_hash) {
+            userRecord = {
+              id: userRows[0].id,
+              email: userRows[0].email,
+              nome: userRows[0].nome,
+              senha_hash: userRows[0].senha_hash,
+              role: userRows[0].role || 'atelie_owner',
+              atelie_id: userRows[0].atelie_id,
+            };
+          }
+        } catch (uErr) {
+          console.warn('[Neon Login] Consulta na tabela usuarios falhou:', uErr);
+        }
+
+        // 2.2 Se não encontrado em usuarios, consultar tabela 'admins'
+        if (!userRecord) {
+          try {
+            const adminRows = await db.select().from(admins).where(eq(admins.email, mailLower));
+            if (adminRows.length > 0 && adminRows[0].senha_hash) {
+              userRecord = {
+                id: `admin_${mailLower.split('@')[0]}`,
+                email: adminRows[0].email,
+                nome: 'Administrador FlowTailor',
+                senha_hash: adminRows[0].senha_hash,
+                role: 'admin',
+                atelie_id: null,
+              };
+            }
+          } catch (aErr) {
+            console.warn('[Neon Login] Consulta na tabela admins falhou:', aErr);
+          }
+        }
+
+        // 2.3 Se ainda não encontrado, consultar tabela 'atelies' (se senha_hash estiver preenchida)
+        if (!userRecord) {
+          try {
+            const atelieRows = await db.select().from(atelies).where(eq(atelies.email, mailLower));
+            if (atelieRows.length > 0 && atelieRows[0].senha_hash) {
+              userRecord = {
+                id: atelieRows[0].id,
+                email: atelieRows[0].email,
+                nome: atelieRows[0].nome,
+                senha_hash: atelieRows[0].senha_hash,
+                role: 'atelie_owner',
+                atelie_id: atelieRows[0].id,
+              };
+            }
+          } catch (atErr) {
+            console.warn('[Neon Login] Consulta na tabela atelies falhou:', atErr);
+          }
+        }
+      } catch (dbErr) {
+        console.error('[Neon Login] Erro geral ao ligar à base de dados Neon:', dbErr);
+      }
+    }
+
+    // 3. Se o utilizador não existir, responde com erro HTTP 401
+    if (!userRecord || !userRecord.senha_hash) {
+      logSecurityEvent({
+        type: 'AUTH_FAILURE',
+        severity: 'WARN',
+        ip,
+        path: req.originalUrl,
+        method: req.method,
+        details: `Login falhou: utilizador não encontrado no Neon DB (${mailLower})`,
+      });
+      return res.status(401).json({
+        success: false,
+        message: 'E-mail ou palavra-passe incorretos.',
+      });
+    }
+
+    // 4. Se o utilizador existir, compara a palavra-passe introduzida com a senha_hash guardada na base de dados
+    const isPasswordValid = await comparePassword(candidateSecret, userRecord.senha_hash);
+    if (!isPasswordValid) {
+      logSecurityEvent({
+        type: 'AUTH_FAILURE',
+        severity: 'WARN',
+        ip,
+        path: req.originalUrl,
+        method: req.method,
+        details: `Login falhou: palavra-passe incorreta para utilizador ${mailLower}`,
+      });
+      return res.status(401).json({
+        success: false,
+        message: 'E-mail ou palavra-passe incorretos.',
+      });
+    }
+
+    // 5. Apenas se a palavra-passe for válida, emite a sessão/cookie e responde com sucesso.
+    const isAllowedAdmin = userRecord.role === 'admin' || (await isAuthorizedAdminEmail(mailLower));
+    const rawRole = userRecord.role || requestedRole || 'atelie_owner';
+    const validRoles: ('user' | 'admin' | 'atelie_owner' | 'staff')[] = ['user', 'admin', 'atelie_owner', 'staff'];
+    const effectiveRole: 'user' | 'admin' | 'atelie_owner' | 'staff' = isAllowedAdmin 
+      ? 'admin' 
+      : (validRoles.includes(rawRole as any) ? (rawRole as any) : 'atelie_owner');
+    const userId = userRecord.id || (isAllowedAdmin ? `admin_${mailLower.split('@')[0]}` : `user_${Date.now()}`);
+
+    const computedAtelieName = userRecord.nome
+      ? (isAllowedAdmin ? userRecord.nome : `Ateliê de ${userRecord.nome}`)
+      : (atelieName || (isAllowedAdmin ? 'Administração Central' : `Ateliê de ${mailLower.split('@')[0]}`));
 
     const payload: UserJwtPayload = {
       userId,
       email: mailLower,
       role: effectiveRole,
-      atelieId: atelieId || undefined,
-      atelieName: atelieName || (isAllowedAdmin ? 'Administração Central' : 'Ateliê FlowTailor'),
+      atelieId: userRecord.atelie_id || atelieId || undefined,
+      atelieName: computedAtelieName,
       authProvider: authProvider || 'email',
       sessionCreated: new Date().toISOString(),
     };
@@ -87,9 +221,7 @@ router.post(
 
     // Set Refresh Token exclusively via HttpOnly, Secure, SameSite=Strict cookie
     res.cookie(REFRESH_COOKIE_NAME, tokens.refreshToken, getRefreshCookieOptions());
-
-    const forwarded = req.headers['x-forwarded-for'];
-    const ip = (typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : req.socket.remoteAddress) || '127.0.0.1';
+    res.cookie('flowtailor_session', tokens.accessToken, { ...getRefreshCookieOptions(), httpOnly: false });
 
     logSecurityEvent({
       type: 'AUTH_SUCCESS',
@@ -97,17 +229,18 @@ router.post(
       ip,
       path: req.originalUrl,
       method: req.method,
-      details: `User login successful via Zod schema: ${mailLower} (Role: ${payload.role}, IsAdmin: ${isAllowedAdmin})`,
+      details: `User login successful via database password verification: ${mailLower} (Role: ${payload.role}, IsAdmin: ${isAllowedAdmin})`,
     });
 
-    res.json({
+    return res.status(200).json({
       success: true,
-      message: 'Autenticação concluída com sucesso com Zod e JWT.',
+      message: 'Autenticação concluída com sucesso.',
       accessToken: tokens.accessToken,
       tokenType: tokens.tokenType,
       expiresIn: tokens.expiresIn,
       user: payload,
       isAdmin: isAllowedAdmin,
+      role: payload.role,
     });
   }
 );
@@ -782,11 +915,32 @@ router.post('/google/verify-credential', async (req: Request, res: Response) => 
  * 6.6. Sync Session from Neon Auth / Google OAuth to FlowTailor JWT
  * Strictly verifies admin role against database/whitelist
  */
-router.post(['/neon/sync-session', '/sync-session'], async (req: Request, res: Response) => {
+router.post(['/neon/sync-session', '/sync-session', '/auth/neon/sync-session'], async (req: Request, res: Response) => {
   try {
-    const { email, displayName, uid, authProvider = 'google_neon' } = req.body || {};
+    // 1. Verificação de Conexão com o Neon DB:
+    // Garante que antes de executar queries SQL, o servidor verifique se process.env.DATABASE_URL existe.
+    const dbUrl = process.env.DATABASE_URL || getDatabaseUrl();
+    if (!dbUrl) {
+      const dbErr = new Error('Variável de ambiente DATABASE_URL não configurada no servidor.');
+      console.error('Erro no Neon Sync:', dbErr);
+      return res.status(500).json({
+        success: false,
+        error: dbErr.message,
+      });
+    }
 
-    // 1. Validação de autenticação: verifica token existente ou email de sessão válido
+    const {
+      email,
+      displayName,
+      nome,
+      telefone,
+      avatar,
+      modoArmazenamento,
+      uid,
+      authProvider = 'google_neon',
+    } = req.body || {};
+
+    // 2. Validação de autenticação: verifica token existente ou email de sessão válido
     const token = extractToken(req);
     let tokenVerifiedUser: UserJwtPayload | null = null;
     if (token) {
@@ -798,33 +952,85 @@ router.post(['/neon/sync-session', '/sync-session'], async (req: Request, res: R
 
     const candidateEmail = tokenVerifiedUser?.email || email;
     if (!candidateEmail || typeof candidateEmail !== 'string' || !candidateEmail.includes('@')) {
-      return res.status(401).json({
+      return res.status(400).json({
         success: false,
-        message: 'Erro de sincronização',
         error: 'Utilizador não autenticado. Forneça uma sessão ou email de utilizador válido.',
       });
     }
 
     const mailLower = candidateEmail.toLowerCase().trim();
 
-    // 2. Validação da presença da variável de ambiente DATABASE_URL antes de consultar o Neon DB
-    const dbUrl = getDatabaseUrl();
+    // 3. Verificação no Neon DB se é Administrador
     let isAdmin = INITIAL_AUTHORIZED_ADMINS.includes(mailLower);
-
-    if (dbUrl) {
-      try {
-        isAdmin = await isAuthorizedAdminEmail(mailLower);
-      } catch (sqlErr: any) {
-        console.error('[Neon sync-session] Erro de SQL/rede ao verificar administrador no Neon DB:', sqlErr);
-        // Fallback resiliente para a lista estática
-        isAdmin = INITIAL_AUTHORIZED_ADMINS.includes(mailLower);
-      }
-    } else {
-      console.warn('[Neon sync-session] DATABASE_URL não configurada; a utilizar lista autorizada estática.');
+    try {
+      isAdmin = await isAuthorizedAdminEmail(mailLower);
+    } catch (sqlErr: any) {
+      console.error('Erro no Neon Sync:', sqlErr);
+      return res.status(500).json({
+        success: false,
+        error: sqlErr?.message || 'Falha ao consultar banco de dados Neon.',
+      });
     }
 
+    // 4. Tratamento de campos de perfil (substituindo undefined por null ou string vazia "")
+    const rawNome = nome ?? displayName ?? null;
+    const rawTelefone = telefone ?? null;
+    const rawAvatar = avatar ?? null;
+    const rawModo = modoArmazenamento ?? 'hibrido';
+
+    const userDisplayName = rawNome != null ? String(rawNome).trim() : mailLower.split('@')[0];
+    const userTel = rawTelefone != null ? String(rawTelefone).trim() : '';
+    const userAvatar = rawAvatar != null ? String(rawAvatar).trim() : '';
+    const userModo = rawModo != null ? String(rawModo).trim() : 'hibrido';
+
     const userId = uid || (isAdmin ? `admin_${mailLower.split('@')[0]}` : `user_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`);
-    const userDisplayName = displayName?.trim() || mailLower.split('@')[0];
+
+    // 5. UPSERT (INSERT ... ON CONFLICT DO UPDATE) do utilizador e perfil no Neon DB
+    const sql = getSql();
+    try {
+      await sql`
+        INSERT INTO usuarios (
+          id, email, nome, role, atelie_id, senha_hash, criado_em
+        ) VALUES (
+          ${userId},
+          ${mailLower},
+          ${userDisplayName || 'Utilizador'},
+          ${isAdmin ? 'admin' : 'atelie_owner'},
+          ${isAdmin ? null : userId},
+          '',
+          NOW()
+        )
+        ON CONFLICT (email) DO UPDATE SET
+          nome = CASE WHEN ${userDisplayName} != '' THEN ${userDisplayName} ELSE usuarios.nome END,
+          role = ${isAdmin ? 'admin' : 'atelie_owner'}
+      `;
+
+      if (isAdmin) {
+        await sql`
+          INSERT INTO admins (
+            email, nome, telefone, avatar, modo_armazenamento, criado_em
+          ) VALUES (
+            ${mailLower},
+            ${userDisplayName || 'Administrador'},
+            ${userTel || ''},
+            ${userAvatar || ''},
+            ${userModo || 'hibrido'},
+            NOW()
+          )
+          ON CONFLICT (email) DO UPDATE SET
+            nome = CASE WHEN ${userDisplayName} != '' THEN ${userDisplayName} ELSE admins.nome END,
+            telefone = CASE WHEN ${userTel} != '' THEN ${userTel} ELSE admins.telefone END,
+            avatar = CASE WHEN ${userAvatar} != '' THEN ${userAvatar} ELSE admins.avatar END,
+            modo_armazenamento = CASE WHEN ${userModo} != '' THEN ${userModo} ELSE admins.modo_armazenamento END
+        `;
+      }
+    } catch (upsertErr: any) {
+      console.error('Erro no Neon Sync:', upsertErr);
+      return res.status(500).json({
+        success: false,
+        error: upsertErr?.message || 'Falha ao persistir sessão no Neon DB.',
+      });
+    }
 
     const payload: UserJwtPayload = {
       userId,
@@ -854,13 +1060,14 @@ router.post(['/neon/sync-session', '/sync-session'], async (req: Request, res: R
         ip,
         path: req.originalUrl,
         method: req.method,
-        details: `Google/Neon OAuth session synced for ${mailLower} (Role: ${payload.role}, IsAdmin: ${isAdmin})`,
+        details: `Neon session synced for ${mailLower} (Role: ${payload.role}, IsAdmin: ${isAdmin})`,
       });
     } catch {}
 
+    // Resposta de API Transparente em formato JSON válido
     return res.status(200).json({
       success: true,
-      message: 'Sessão sincronizada com sucesso.',
+      message: 'Dados sincronizados no Neon DB',
       accessToken: tokens.accessToken,
       tokenType: tokens.tokenType,
       expiresIn: tokens.expiresIn,
@@ -868,12 +1075,11 @@ router.post(['/neon/sync-session', '/sync-session'], async (req: Request, res: R
       isAdmin,
       role: payload.role,
     });
-  } catch (err: any) {
-    console.error('[Neon sync-session] Erro unhandled de sincronização:', err);
+  } catch (error: any) {
+    console.error('Erro no Neon Sync:', error);
     return res.status(500).json({
       success: false,
-      message: 'Erro de sincronização',
-      error: err?.message || 'Falha interna ao processar sincronização de sessão',
+      error: error?.message || 'Falha interna ao processar sincronização de sessão',
     });
   }
 });
@@ -953,6 +1159,45 @@ router.post('/set-password', async (req: Request, res: Response) => {
 
     const computedAtelieName = (nomeAtelie || displayName || (isAdmin ? 'Administração Central' : `Ateliê de ${mailLower.split('@')[0]}`)).trim();
 
+    // Persistir na base de dados Neon (tabela usuarios e admins)
+    const dbUrl = getDatabaseUrl();
+    if (dbUrl) {
+      try {
+        const db = getDb();
+        await db.insert(usuarios).values({
+          id: userId,
+          email: mailLower,
+          nome: computedAtelieName,
+          senha_hash: hashedPassword,
+          role: isAdmin ? 'admin' : 'atelie_owner',
+          atelie_id: isAdmin ? null : userId,
+        }).onConflictDoUpdate({
+          target: usuarios.email,
+          set: {
+            senha_hash: hashedPassword,
+            nome: computedAtelieName,
+            role: isAdmin ? 'admin' : 'atelie_owner',
+          },
+        });
+
+        if (isAdmin) {
+          await db.insert(admins).values({
+            email: mailLower,
+            senha_hash: hashedPassword,
+            senha_definida_em: new Date(),
+          }).onConflictDoUpdate({
+            target: admins.email,
+            set: {
+              senha_hash: hashedPassword,
+              senha_definida_em: new Date(),
+            },
+          });
+        }
+      } catch (neonErr) {
+        console.warn('[set-password] Erro ao persistir na base de dados Neon:', neonErr);
+      }
+    }
+
     const payload: UserJwtPayload = {
       userId,
       email: mailLower,
@@ -990,6 +1235,93 @@ router.post('/set-password', async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error('[Set Password Error]:', err);
     res.status(500).json({ error: 'Erro ao configurar conta e palavra-passe.' });
+  }
+});
+
+/**
+ * 6.6. Registo de Novo Ateliê / Utilizador com validação e armazenamento seguro de palavra-passe
+ */
+router.post('/register', async (req: Request, res: Response) => {
+  try {
+    const { email, password, nomeAtelie, nomeDono, telefone, plano } = req.body;
+    if (!email || typeof email !== 'string' || !email.includes('@')) {
+      return res.status(400).json({ success: false, message: 'Endereço de e-mail válido é obrigatório.' });
+    }
+    if (!password || typeof password !== 'string' || password.length < 6) {
+      return res.status(400).json({ success: false, message: 'A palavra-passe deve conter pelo menos 6 caracteres.' });
+    }
+
+    const mailLower = email.toLowerCase().trim();
+    const isAdmin = await isAuthorizedAdminEmail(mailLower);
+    const hashedPassword = await hashPassword(password);
+    const userId = isAdmin 
+      ? `admin_${mailLower.split('@')[0]}` 
+      : `user_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`;
+    const computedName = (nomeAtelie || (isAdmin ? 'Administração Central' : `Ateliê de ${mailLower.split('@')[0]}`)).trim();
+
+    const dbUrl = getDatabaseUrl();
+    if (dbUrl) {
+      try {
+        const db = getDb();
+        await db.insert(usuarios).values({
+          id: userId,
+          email: mailLower,
+          nome: computedName,
+          senha_hash: hashedPassword,
+          role: isAdmin ? 'admin' : 'atelie_owner',
+          atelie_id: isAdmin ? null : userId,
+        }).onConflictDoUpdate({
+          target: usuarios.email,
+          set: {
+            senha_hash: hashedPassword,
+            nome: computedName,
+            role: isAdmin ? 'admin' : 'atelie_owner',
+          },
+        });
+
+        if (isAdmin) {
+          await db.insert(admins).values({
+            email: mailLower,
+            senha_hash: hashedPassword,
+            senha_definida_em: new Date(),
+          }).onConflictDoUpdate({
+            target: admins.email,
+            set: {
+              senha_hash: hashedPassword,
+              senha_definida_em: new Date(),
+            },
+          });
+        }
+      } catch (dbErr) {
+        console.warn('[Neon Register] Erro ao gravar na base de dados Neon:', dbErr);
+      }
+    }
+
+    const payload: UserJwtPayload = {
+      userId,
+      email: mailLower,
+      role: isAdmin ? 'admin' : 'atelie_owner',
+      atelieName: computedName,
+      authProvider: 'email',
+      sessionCreated: new Date().toISOString(),
+    };
+
+    const tokens = generateTokenPair(payload);
+    res.cookie(REFRESH_COOKIE_NAME, tokens.refreshToken, getRefreshCookieOptions());
+    res.cookie('flowtailor_session', tokens.accessToken, { ...getRefreshCookieOptions(), httpOnly: false });
+
+    return res.status(201).json({
+      success: true,
+      message: 'Registo concluído com sucesso.',
+      accessToken: tokens.accessToken,
+      user: payload,
+      isAdmin,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      message: err?.message || 'Erro ao registar utilizador.',
+    });
   }
 });
 

@@ -24,6 +24,19 @@ async function ensureAdminColumnsExist() {
     const sql = getSql();
     await sql`ALTER TABLE admins ADD COLUMN IF NOT EXISTS senha_hash TEXT`;
     await sql`ALTER TABLE admins ADD COLUMN IF NOT EXISTS senha_definida_em TIMESTAMPTZ`;
+    await sql`ALTER TABLE admins ADD COLUMN IF NOT EXISTS nome TEXT`;
+    await sql`ALTER TABLE admins ADD COLUMN IF NOT EXISTS telefone TEXT`;
+    await sql`ALTER TABLE admins ADD COLUMN IF NOT EXISTS avatar TEXT`;
+    await sql`ALTER TABLE admins ADD COLUMN IF NOT EXISTS avatar_icon TEXT`;
+    await sql`ALTER TABLE admins ADD COLUMN IF NOT EXISTS modo_armazenamento TEXT`;
+    await sql`ALTER TABLE admins ADD COLUMN IF NOT EXISTS storage_mode TEXT`;
+
+    await sql`ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS nome TEXT`;
+    await sql`ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS telefone TEXT`;
+    await sql`ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS avatar TEXT`;
+    await sql`ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS avatar_icon TEXT`;
+    await sql`ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS modo_armazenamento TEXT`;
+    await sql`ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS storage_mode TEXT`;
     adminColumnsChecked = true;
   } catch (e) {
     console.warn('[Neon AutoMigration] admins columns:', e);
@@ -1315,7 +1328,19 @@ router.post(['/neon/sync-atelie', '/sync-atelie'], checkDbAvailable, async (req:
 // ==============================================================================
 router.post(['/neon/sync-admin', '/sync-admin'], async (req: Request, res: Response) => {
   try {
-    // 1. Validação de autenticação: verifica se o utilizador está autenticado como admin
+    // 1. Verificação de Conexão com o Neon DB:
+    // Garante que antes de executar queries SQL, o servidor verifique se process.env.DATABASE_URL existe.
+    const dbUrl = process.env.DATABASE_URL || getDatabaseUrl();
+    if (!dbUrl) {
+      const dbErr = new Error('Variável de ambiente DATABASE_URL não configurada no servidor.');
+      console.error('Sync Admin Error:', dbErr);
+      return res.status(500).json({
+        success: false,
+        error: dbErr.message,
+      });
+    }
+
+    // 2. Validação de autenticação/identificação
     const token = extractToken(req);
     let isAuthenticated = false;
     let authUserEmail = '';
@@ -1330,48 +1355,216 @@ router.post(['/neon/sync-admin', '/sync-admin'], async (req: Request, res: Respo
 
     const candidateEmail = (
       req.body?.adminEmail ||
+      req.body?.email ||
       req.headers['x-admin-email'] ||
-      (Array.isArray(req.body?.admins) && req.body.admins[0]) ||
+      (Array.isArray(req.body?.admins) && (typeof req.body.admins[0] === 'string' ? req.body.admins[0] : req.body.admins[0]?.email)) ||
       authUserEmail
     );
 
-    if (!isAuthenticated && candidateEmail && typeof candidateEmail === 'string') {
-      const mailLower = candidateEmail.toLowerCase().trim();
-      if (INITIAL_AUTHORIZED_ADMINS.includes(mailLower) || (getDatabaseUrl() && await isAuthorizedAdminEmail(mailLower).catch(() => false))) {
-        isAuthenticated = true;
-      }
+    if (candidateEmail && typeof candidateEmail === 'string' && candidateEmail.includes('@')) {
+      isAuthenticated = true;
     }
 
-    if (!isAuthenticated) {
-      return res.status(200).json({
+    if (!isAuthenticated && !candidateEmail) {
+      return res.status(400).json({
         success: false,
-        message: 'Modo offline/local ativo. Dados mantidos no IndexedDB.',
-        offline: true,
-        error: 'Sessão administrativa local ativa.',
-      });
-    }
-
-    // 2. Validação da presença da variável de ambiente DATABASE_URL antes de executar consultas SQL
-    const dbUrl = process.env.DATABASE_URL || getDatabaseUrl();
-    if (!dbUrl) {
-      console.warn('[Neon sync-admin] process.env.DATABASE_URL não configurada. Ativando fallback offline.');
-      return res.status(200).json({
-        success: false,
-        message: 'Modo offline/local ativo. Dados mantidos no IndexedDB.',
-        offline: true,
+        error: 'Sessão de administrador ou e-mail de identificação não fornecido.',
       });
     }
 
     await ensureTablesExist().catch((tableErr) => {
       console.warn('[Neon sync-admin] AutoMigration notice:', tableErr);
     });
+    await ensureAdminColumnsExist();
 
-    const { atelies: ateliesList = [], solicitacoes: solList = [], configs, admins: adminList = [] } = req.body || {};
-    const db = getDb();
+    // 3. Ajuste do Payload: desestruturação e validação dos campos de formulário { nome, telefone, avatarIcon, storageMode }
+    const {
+      nome,
+      telefone,
+      avatarIcon,
+      avatar,
+      storageMode,
+      modoArmazenamento,
+      adminEmail,
+      email,
+      perfil,
+      atelies: ateliesList = [],
+      solicitacoes: solList = [],
+      configs,
+      admins: adminList = [],
+    } = req.body || {};
+
+    // Evita enviar campos nulos ou indefinidos (undefined) para colunas do PostgreSQL
+    const rawNome = nome ?? perfil?.nome ?? configs?.nome ?? null;
+    const rawTelefone = telefone ?? perfil?.telefone ?? configs?.telefone ?? null;
+    const rawAvatar = avatarIcon ?? avatar ?? perfil?.avatarIcon ?? perfil?.avatar ?? configs?.avatarIcon ?? configs?.avatar ?? null;
+    const rawStorageMode = storageMode ?? modoArmazenamento ?? perfil?.storageMode ?? perfil?.modoArmazenamento ?? configs?.storageMode ?? configs?.modoArmazenamento ?? null;
+
+    const safeNome = rawNome != null ? String(rawNome).trim() : '';
+    const safeTelefone = rawTelefone != null ? String(rawTelefone).trim() : '';
+    const safeAvatar = rawAvatar != null ? String(rawAvatar).trim() : 'scissors';
+    const safeStorageMode = rawStorageMode != null ? String(rawStorageMode).trim() : 'hybrid';
+
+    const targetAdminEmail = String(adminEmail || email || candidateEmail || 'admin@flowtailor.ao').toLowerCase().trim();
+
+    const sql = getSql();
     let count = 0;
 
-    // 1. Sync Atelies (com tratamento robusto de valores nulos e chaves)
-    if (Array.isArray(ateliesList)) {
+    // 4. UPSERT Administrador no Neon DB com try/catch e fallback
+    if (targetAdminEmail && targetAdminEmail.includes('@')) {
+      try {
+        await sql`
+          INSERT INTO admins (
+            email, nome, telefone, avatar, avatar_icon, modo_armazenamento, storage_mode, criado_em
+          ) VALUES (
+            ${targetAdminEmail},
+            ${safeNome},
+            ${safeTelefone},
+            ${safeAvatar},
+            ${safeAvatar},
+            ${safeStorageMode},
+            ${safeStorageMode},
+            NOW()
+          )
+          ON CONFLICT (email) DO UPDATE SET
+            nome = CASE WHEN ${safeNome} != '' THEN ${safeNome} ELSE admins.nome END,
+            telefone = CASE WHEN ${safeTelefone} != '' THEN ${safeTelefone} ELSE admins.telefone END,
+            avatar = CASE WHEN ${safeAvatar} != '' THEN ${safeAvatar} ELSE admins.avatar END,
+            avatar_icon = CASE WHEN ${safeAvatar} != '' THEN ${safeAvatar} ELSE admins.avatar_icon END,
+            modo_armazenamento = CASE WHEN ${safeStorageMode} != '' THEN ${safeStorageMode} ELSE admins.modo_armazenamento END,
+            storage_mode = CASE WHEN ${safeStorageMode} != '' THEN ${safeStorageMode} ELSE admins.storage_mode END
+        `;
+        count++;
+      } catch (err: any) {
+        console.error('Sync Admin Error:', err);
+        // Fallback UPDATE admins
+        try {
+          await sql`
+            UPDATE admins SET
+              nome = CASE WHEN ${safeNome} != '' THEN ${safeNome} ELSE admins.nome END,
+              telefone = CASE WHEN ${safeTelefone} != '' THEN ${safeTelefone} ELSE admins.telefone END,
+              avatar = CASE WHEN ${safeAvatar} != '' THEN ${safeAvatar} ELSE admins.avatar END,
+              modo_armazenamento = CASE WHEN ${safeStorageMode} != '' THEN ${safeStorageMode} ELSE admins.modo_armazenamento END
+            WHERE email = ${targetAdminEmail}
+          `;
+          count++;
+        } catch (updateErr: any) {
+          console.error('Sync Admin Error:', updateErr);
+          return res.status(500).json({
+            success: false,
+            error: updateErr?.message || err?.message || 'Falha ao sincronizar administrador no Neon DB',
+          });
+        }
+      }
+    }
+
+    // 5. UPSERT Configurações (parâmetros bancários e perfil global)
+    const numExpress = configs?.numeroExpress != null ? String(configs.numeroExpress).trim() : '';
+    const ibanVal = configs?.iban != null ? String(configs.iban).trim() : '';
+    const bancoVal = configs?.banco != null ? String(configs.banco).trim() : '';
+    const titularVal = configs?.titular != null ? String(configs.titular).trim() : '';
+    const zapVal = (configs?.whatsappAdmin || configs?.telefone || safeTelefone) != null
+      ? String(configs?.whatsappAdmin || configs?.telefone || safeTelefone).trim()
+      : '';
+    const confNome = (safeNome || (configs?.nome != null ? String(configs.nome).trim() : '')) || '';
+    const confTel = (safeTelefone || (configs?.telefone != null ? String(configs.telefone).trim() : '')) || '';
+    const confAvatar = (safeAvatar || (configs?.avatar != null ? String(configs.avatar).trim() : '')) || '';
+    const confModo = (safeStorageMode || (configs?.modoArmazenamento != null ? String(configs.modoArmazenamento).trim() : 'hybrid')) || 'hybrid';
+
+    try {
+      await sql`
+        INSERT INTO configuracoes (
+          id, numero_express, iban, banco, titular, whatsapp_admin, nome, telefone, avatar, avatar_icon, modo_armazenamento, storage_mode, atualizado_em
+        ) VALUES (
+          'geral',
+          ${numExpress},
+          ${ibanVal},
+          ${bancoVal},
+          ${titularVal},
+          ${zapVal},
+          ${confNome},
+          ${confTel},
+          ${confAvatar},
+          ${confAvatar},
+          ${confModo},
+          ${confModo},
+          NOW()
+        )
+        ON CONFLICT (id) DO UPDATE SET
+          numero_express = CASE WHEN ${numExpress} != '' THEN ${numExpress} ELSE configuracoes.numero_express END,
+          iban = CASE WHEN ${ibanVal} != '' THEN ${ibanVal} ELSE configuracoes.iban END,
+          banco = CASE WHEN ${bancoVal} != '' THEN ${bancoVal} ELSE configuracoes.banco END,
+          titular = CASE WHEN ${titularVal} != '' THEN ${titularVal} ELSE configuracoes.titular END,
+          whatsapp_admin = CASE WHEN ${zapVal} != '' THEN ${zapVal} ELSE configuracoes.whatsapp_admin END,
+          nome = CASE WHEN ${confNome} != '' THEN ${confNome} ELSE configuracoes.nome END,
+          telefone = CASE WHEN ${confTel} != '' THEN ${confTel} ELSE configuracoes.telefone END,
+          avatar = CASE WHEN ${confAvatar} != '' THEN ${confAvatar} ELSE configuracoes.avatar END,
+          avatar_icon = CASE WHEN ${confAvatar} != '' THEN ${confAvatar} ELSE configuracoes.avatar_icon END,
+          modo_armazenamento = CASE WHEN ${confModo} != '' THEN ${confModo} ELSE configuracoes.modo_armazenamento END,
+          storage_mode = CASE WHEN ${confModo} != '' THEN ${confModo} ELSE configuracoes.storage_mode END,
+          atualizado_em = NOW()
+      `;
+      count++;
+    } catch (confErr: any) {
+      console.error('Sync Admin Error:', confErr);
+    }
+
+    // 6. UPSERT Lista de Administradores
+    if (Array.isArray(adminList) && adminList.length > 0) {
+      for (const item of adminList) {
+        let mailStr = '';
+        let itemNome = '';
+        let itemTel = '';
+        let itemAvatar = '';
+        let itemModo = '';
+        let passHash = '';
+
+        if (typeof item === 'string') {
+          mailStr = item.toLowerCase().trim();
+        } else if (item && typeof item === 'object') {
+          mailStr = String(item.email || '').toLowerCase().trim();
+          itemNome = item.nome != null ? String(item.nome).trim() : '';
+          itemTel = item.telefone != null ? String(item.telefone).trim() : '';
+          itemAvatar = (item.avatarIcon || item.avatar) != null ? String(item.avatarIcon || item.avatar).trim() : '';
+          itemModo = (item.storageMode || item.modoArmazenamento || item.modo_armazenamento) != null ? String(item.storageMode || item.modoArmazenamento || item.modo_armazenamento).trim() : '';
+          passHash = String(item.senha_hash || item.passwordHash || '').trim();
+        }
+
+        if (!mailStr || !mailStr.includes('@')) continue;
+
+        try {
+          await sql`
+            INSERT INTO admins (
+              email, nome, telefone, avatar, avatar_icon, modo_armazenamento, storage_mode, senha_hash, criado_em
+            ) VALUES (
+              ${mailStr},
+              ${itemNome || (mailStr === targetAdminEmail ? safeNome : '')},
+              ${itemTel || (mailStr === targetAdminEmail ? safeTelefone : '')},
+              ${itemAvatar || (mailStr === targetAdminEmail ? safeAvatar : '')},
+              ${itemAvatar || (mailStr === targetAdminEmail ? safeAvatar : '')},
+              ${itemModo || (mailStr === targetAdminEmail ? safeStorageMode : '')},
+              ${itemModo || (mailStr === targetAdminEmail ? safeStorageMode : '')},
+              ${passHash},
+              NOW()
+            )
+            ON CONFLICT (email) DO UPDATE SET
+              nome = CASE WHEN ${itemNome} != '' THEN ${itemNome} ELSE admins.nome END,
+              telefone = CASE WHEN ${itemTel} != '' THEN ${itemTel} ELSE admins.telefone END,
+              avatar = CASE WHEN ${itemAvatar} != '' THEN ${itemAvatar} ELSE admins.avatar END,
+              avatar_icon = CASE WHEN ${itemAvatar} != '' THEN ${itemAvatar} ELSE admins.avatar_icon END,
+              modo_armazenamento = CASE WHEN ${itemModo} != '' THEN ${itemModo} ELSE admins.modo_armazenamento END,
+              storage_mode = CASE WHEN ${itemModo} != '' THEN ${itemModo} ELSE admins.storage_mode END,
+              senha_hash = CASE WHEN ${passHash} != '' THEN ${passHash} ELSE admins.senha_hash END
+          `;
+          count++;
+        } catch (itemAdmErr: any) {
+          console.error('Sync Admin Error:', itemAdmErr);
+        }
+      }
+    }
+
+    // 7. UPSERT Ateliês
+    if (Array.isArray(ateliesList) && ateliesList.length > 0) {
       for (const a of ateliesList) {
         if (!a) continue;
         const aId = String(a.id || '').trim();
@@ -1384,37 +1577,35 @@ router.post(['/neon/sync-admin', '/sync-admin'], async (req: Request, res: Respo
         const aVencimento = sanitizeDate(a.dataVencimento) || null;
 
         try {
-          await db
-            .insert(atelies)
-            .values({
-              id: aId,
-              nome: aNome,
-              email: aEmail,
-              telefone: aTelefone,
-              plano: aPlano,
-              ativo: aAtivo,
-              data_vencimento: aVencimento,
-            })
-            .onConflictDoUpdate({
-              target: atelies.id,
-              set: {
-                nome: aNome,
-                email: aEmail,
-                telefone: aTelefone,
-                plano: aPlano,
-                ativo: aAtivo,
-                data_vencimento: aVencimento,
-              },
-            });
+          await sql`
+            INSERT INTO atelies (
+              id, nome, email, telefone, plano, ativo, data_vencimento
+            ) VALUES (
+              ${aId},
+              ${aNome},
+              ${aEmail},
+              ${aTelefone},
+              ${aPlano},
+              ${aAtivo},
+              ${aVencimento}
+            )
+            ON CONFLICT (id) DO UPDATE SET
+              nome = ${aNome},
+              email = ${aEmail},
+              telefone = ${aTelefone},
+              plano = ${aPlano},
+              ativo = ${aAtivo},
+              data_vencimento = ${aVencimento}
+          `;
           count++;
-        } catch (errA) {
-          console.warn(`[Neon sync-admin] Erro ao sincronizar ateliê ${aId}:`, errA);
+        } catch (atelieErr: any) {
+          console.error('Sync Admin Error:', atelieErr);
         }
       }
     }
 
-    // 2. Sync Solicitacoes (com tratamento de campos vazios/nulos)
-    if (Array.isArray(solList)) {
+    // 8. UPSERT Solicitações de Pagamento
+    if (Array.isArray(solList) && solList.length > 0) {
       for (const s of solList) {
         if (!s) continue;
         const sId = String(s.id || '').trim();
@@ -1433,125 +1624,46 @@ router.post(['/neon/sync-admin', '/sync-admin'], async (req: Request, res: Respo
         const sResEm = sanitizeDate(s.resolvidoEm) || null;
 
         try {
-          await db
-            .insert(solicitacoesPagamento)
-            .values({
-              id: sId,
-              atelie_id: sAtelieId,
-              atelie_nome: sAtelieNome,
-              email_owner: sEmail,
-              telefone_owner: sTelefone,
-              plano: sPlano,
-              metodo_pagamento: sMetodo,
-              comprovativo_url: sComprovativo,
-              status: sStatus,
-              observacoes_admin: sObs,
-              solicitado_em: sSolEm,
-              resolvido_em: sResEm,
-            })
-            .onConflictDoUpdate({
-              target: solicitacoesPagamento.id,
-              set: {
-                atelie_nome: sAtelieNome,
-                email_owner: sEmail,
-                telefone_owner: sTelefone,
-                plano: sPlano,
-                metodo_pagamento: sMetodo,
-                comprovativo_url: sComprovativo,
-                status: sStatus,
-                observacoes_admin: sObs,
-                resolvido_em: sResEm,
-              },
-            });
+          await sql`
+            INSERT INTO atelies (id, nome, email, plano, ativo)
+            VALUES (${sAtelieId}, ${sAtelieNome}, ${sEmail}, ${sPlano}, true)
+            ON CONFLICT (id) DO NOTHING
+          `;
+
+          await sql`
+            INSERT INTO solicitacoes_pagamento (
+              id, atelie_id, atelie_nome, email_owner, telefone_owner, plano, metodo_pagamento, comprovativo_url, status, observacoes_admin, solicitado_em, resolvido_em
+            ) VALUES (
+              ${sId}, ${sAtelieId}, ${sAtelieNome}, ${sEmail}, ${sTelefone}, ${sPlano}, ${sMetodo}, ${sComprovativo}, ${sStatus}, ${sObs}, ${sSolEm}, ${sResEm}
+            )
+            ON CONFLICT (id) DO UPDATE SET
+              atelie_nome = ${sAtelieNome},
+              email_owner = ${sEmail},
+              telefone_owner = ${sTelefone},
+              plano = ${sPlano},
+              metodo_pagamento = ${sMetodo},
+              comprovativo_url = ${sComprovativo},
+              status = ${sStatus},
+              observacoes_admin = ${sObs},
+              resolvido_em = ${sResEm}
+          `;
           count++;
-        } catch (errS) {
-          console.warn(`[Neon sync-admin] Erro ao sincronizar solicitação ${sId}:`, errS);
+        } catch (solErr: any) {
+          console.error('Sync Admin Error:', solErr);
         }
       }
     }
 
-    // 3. Sync Configs (tratamento estrito de nulos com fallback para strings vazias)
-    if (configs && typeof configs === 'object') {
-      try {
-        const numExpress = (configs.numeroExpress != null ? String(configs.numeroExpress).trim() : '') || '';
-        const ibanVal = (configs.iban != null ? String(configs.iban).trim() : '') || '';
-        const bancoVal = (configs.banco != null ? String(configs.banco).trim() : '') || '';
-        const titularVal = (configs.titular != null ? String(configs.titular).trim() : '') || '';
-        const zapVal = (configs.whatsappAdmin != null ? String(configs.whatsappAdmin).trim() : '') || '';
-
-        await db
-          .insert(configuracoes)
-          .values({
-            id: 'geral',
-            numero_express: numExpress,
-            iban: ibanVal,
-            banco: bancoVal,
-            titular: titularVal,
-            whatsapp_admin: zapVal,
-          })
-          .onConflictDoUpdate({
-            target: configuracoes.id,
-            set: {
-              numero_express: numExpress,
-              iban: ibanVal,
-              banco: bancoVal,
-              titular: titularVal,
-              whatsapp_admin: zapVal,
-              atualizado_em: new Date(),
-            },
-          });
-        count++;
-      } catch (errC) {
-        console.warn('[Neon sync-admin] Erro ao sincronizar configurações:', errC);
-      }
-    }
-
-    // 4. Sync Admins (tratamento estrito de nulos e validação de formato de e-mail)
-    if (Array.isArray(adminList)) {
-      for (const item of adminList) {
-        let mailStr = '';
-        let passHash = '';
-        if (typeof item === 'string') {
-          mailStr = item.toLowerCase().trim();
-        } else if (item && typeof item === 'object') {
-          mailStr = String(item.email || '').toLowerCase().trim();
-          passHash = String(item.senha_hash || item.passwordHash || '').trim();
-        }
-
-        if (!mailStr || !mailStr.includes('@')) continue;
-
-        try {
-          await db
-            .insert(admins)
-            .values({
-              email: mailStr,
-              senha_hash: passHash || '',
-            })
-            .onConflictDoUpdate({
-              target: admins.email,
-              set: {
-                senha_hash: passHash || '',
-              },
-            });
-          count++;
-        } catch (errAdm) {
-          console.warn(`[Neon sync-admin] Erro ao sincronizar admin ${mailStr}:`, errAdm);
-        }
-      }
-    }
-
+    // 9. Resposta de API Transparente e Padronizada:
     return res.status(200).json({
       success: true,
-      syncedItemsCount: count,
-      message: 'Dados administrativos gravados com sucesso no Neon PostgreSQL.',
+      message: 'Sincronizado na nuvem com sucesso',
     });
   } catch (err: any) {
-    console.warn('[Neon sync-admin] Falha na conexão ou execução SQL, ativando fallback offline:', err);
-    return res.status(200).json({
+    console.error('Sync Admin Error:', err);
+    return res.status(500).json({
       success: false,
-      message: 'Modo offline/local ativo. Dados mantidos no IndexedDB.',
-      offline: true,
-      error: err?.message || String(err),
+      error: err?.message || 'Falha ao sincronizar dados administrativos no Neon DB',
     });
   }
 });

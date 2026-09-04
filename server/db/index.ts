@@ -161,15 +161,60 @@ export async function ensureTablesExist(): Promise<{ success: boolean; error?: s
       )
     `;
 
-    // Garantir colunas de senha na tabela admins se ela já existia antes
+    await sql`
+      CREATE TABLE IF NOT EXISTS usuarios (
+        id TEXT PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL,
+        nome TEXT,
+        senha_hash TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'atelie_owner',
+        atelie_id TEXT,
+        criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
+    await sql`
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL,
+        nome TEXT,
+        senha_hash TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'atelie_owner',
+        atelie_id TEXT,
+        criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
+    // Garantir colunas de senha e perfil na tabela admins, configuracoes e atelies
     try {
       await sql`ALTER TABLE admins ADD COLUMN IF NOT EXISTS senha_hash TEXT`;
       await sql`ALTER TABLE admins ADD COLUMN IF NOT EXISTS senha_definida_em TIMESTAMPTZ`;
+      await sql`ALTER TABLE admins ADD COLUMN IF NOT EXISTS nome TEXT`;
+      await sql`ALTER TABLE admins ADD COLUMN IF NOT EXISTS telefone TEXT`;
+      await sql`ALTER TABLE admins ADD COLUMN IF NOT EXISTS avatar TEXT`;
+      await sql`ALTER TABLE admins ADD COLUMN IF NOT EXISTS avatar_icon TEXT`;
+      await sql`ALTER TABLE admins ADD COLUMN IF NOT EXISTS modo_armazenamento TEXT`;
+      await sql`ALTER TABLE admins ADD COLUMN IF NOT EXISTS storage_mode TEXT`;
+
+      await sql`ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS nome TEXT`;
+      await sql`ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS telefone TEXT`;
+      await sql`ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS avatar TEXT`;
+      await sql`ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS avatar_icon TEXT`;
+      await sql`ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS modo_armazenamento TEXT`;
+      await sql`ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS storage_mode TEXT`;
+
+      await sql`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS telefone TEXT`;
+      await sql`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS avatar TEXT`;
+      await sql`ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS modo_armazenamento TEXT`;
+
+      await sql`ALTER TABLE atelies ADD COLUMN IF NOT EXISTS senha_hash TEXT`;
     } catch (colErr) {
-      console.warn('[NEON] Aviso ao adicionar colunas na tabela admins:', colErr);
+      console.warn('[NEON] Aviso ao adicionar colunas de senha e perfil:', colErr);
     }
 
     try {
+      await sql`CREATE INDEX IF NOT EXISTS idx_usuarios_email ON usuarios(email)`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_clientes_atelie ON clientes(atelie_id)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_encomendas_atelie ON encomendas(atelie_id)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_encomendas_cliente ON encomendas(cliente_id)`;
@@ -182,8 +227,14 @@ export async function ensureTablesExist(): Promise<{ success: boolean; error?: s
 
     // Inserção de Administradores Iniciais
     await sql`
-      INSERT INTO admins (email) VALUES 
-        ('admin@flowtailor.ao')
+      INSERT INTO admins (email, senha_hash, senha_definida_em) VALUES 
+        ('admin@flowtailor.ao', '$2b$10$Md5fobe5OhlKFDJWJe3xB.ATvluQj9kGqc7/yivcLl6Xn8DBr7S0i', NOW())
+      ON CONFLICT (email) DO NOTHING
+    `;
+
+    await sql`
+      INSERT INTO usuarios (id, email, nome, senha_hash, role) VALUES
+        ('admin_flowtailor', 'admin@flowtailor.ao', 'Administrador Central', '$2b$10$Md5fobe5OhlKFDJWJe3xB.ATvluQj9kGqc7/yivcLl6Xn8DBr7S0i', 'admin')
       ON CONFLICT (email) DO NOTHING
     `;
 

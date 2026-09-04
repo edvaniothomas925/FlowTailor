@@ -13,6 +13,7 @@ export const atelies = pgTable('atelies', {
   plano: text('plano').default('basico').notNull(), // 'basico' | 'pro'
   ativo: boolean('ativo').default(true).notNull(),
   data_vencimento: timestamp('data_vencimento', { withTimezone: true }),
+  senha_hash: text('senha_hash'),
   criado_em: timestamp('criado_em', { withTimezone: true }).defaultNow().notNull(),
 });
 
@@ -103,6 +104,12 @@ export const configuracoes = pgTable('configuracoes', {
   banco: text('banco'),
   titular: text('titular'),
   whatsapp_admin: text('whatsapp_admin'),
+  nome: text('nome'),
+  telefone: text('telefone'),
+  avatar: text('avatar'),
+  avatar_icon: text('avatar_icon'),
+  modo_armazenamento: text('modo_armazenamento'),
+  storage_mode: text('storage_mode'),
   atualizado_em: timestamp('atualizado_em', { withTimezone: true }).defaultNow().notNull(),
 });
 
@@ -112,8 +119,41 @@ export const configuracoes = pgTable('configuracoes', {
  */
 export const admins = pgTable('admins', {
   email: text('email').primaryKey(),
+  nome: text('nome'),
+  telefone: text('telefone'),
+  avatar: text('avatar'),
+  avatar_icon: text('avatar_icon'),
+  modo_armazenamento: text('modo_armazenamento'),
+  storage_mode: text('storage_mode'),
   senha_hash: text('senha_hash'),
   senha_definida_em: timestamp('senha_definida_em', { withTimezone: true }),
+  criado_em: timestamp('criado_em', { withTimezone: true }).defaultNow().notNull(),
+});
+
+/**
+ * Tabela: usuarios
+ * Utilizadores da plataforma autenticados com email e senha_hash.
+ */
+export const usuarios = pgTable('usuarios', {
+  id: text('id').primaryKey(),
+  email: text('email').notNull().unique(),
+  nome: text('nome'),
+  senha_hash: text('senha_hash').notNull(),
+  role: text('role').default('atelie_owner').notNull(),
+  atelie_id: text('atelie_id'),
+  criado_em: timestamp('criado_em', { withTimezone: true }).defaultNow().notNull(),
+});
+
+/**
+ * Tabela: users (alias para compatibilidade)
+ */
+export const users = pgTable('users', {
+  id: text('id').primaryKey(),
+  email: text('email').notNull().unique(),
+  nome: text('nome'),
+  senha_hash: text('senha_hash').notNull(),
+  role: text('role').default('atelie_owner').notNull(),
+  atelie_id: text('atelie_id'),
   criado_em: timestamp('criado_em', { withTimezone: true }).defaultNow().notNull(),
 });
 

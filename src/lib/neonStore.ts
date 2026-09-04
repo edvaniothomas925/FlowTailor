@@ -1212,6 +1212,10 @@ class NeonDatabaseManager {
       try {
         const token = typeof localStorage !== 'undefined' ? localStorage.getItem('jwt_token') : null;
         const currentEmail = typeof localStorage !== 'undefined' ? localStorage.getItem('ateliepro_current_email') : null;
+        const adminNome = typeof localStorage !== 'undefined' ? (localStorage.getItem('ateliepro_admin_nome') || '') : '';
+        const adminTelefone = typeof localStorage !== 'undefined' ? (localStorage.getItem('ateliepro_admin_telefone') || '') : '';
+        const adminAvatarIcon = typeof localStorage !== 'undefined' ? (localStorage.getItem('ateliepro_admin_avatar_icon') || 'scissors') : 'scissors';
+        const storageMode = typeof localStorage !== 'undefined' ? (localStorage.getItem('flowtailor_storage_mode') || 'hybrid') : 'hybrid';
 
         response = await fetch('/api/neon/sync-admin', {
           method: 'POST',
@@ -1222,6 +1226,10 @@ class NeonDatabaseManager {
           },
           body: JSON.stringify({
             adminEmail: currentEmail,
+            nome: adminNome,
+            telefone: adminTelefone,
+            avatarIcon: adminAvatarIcon,
+            storageMode,
             atelies,
             solicitacoes,
             configs,
@@ -1235,16 +1243,29 @@ class NeonDatabaseManager {
         return { success: true, offline: true, syncedItemsCount: totalCount, message: 'Modo offline/local ativo.', error: networkErr?.message || 'Falha de rede' };
       }
 
-      // 1. Ler o status da resposta antes de tentar parsear o JSON - trata HTTP 500 ou 404 sem lançar exceção
-      if (response.status === 500 || response.status === 404) {
-        console.warn(`[Neon Admin Sync] Servidor retornou HTTP ${response.status}. A efetuar fallback seguro para IndexedDB local.`);
+      // 1. Verifica se res.ok é verdadeiro antes de interpretar a resposta, evitando que exceções não tratadas afetem o botão na interface
+      if (!response.ok) {
+        let errorMsg = `Erro no servidor HTTP ${response.status}`;
+        try {
+          const errData = await response.json();
+          if (errData?.error) {
+            errorMsg = errData.error;
+          } else if (errData?.message) {
+            errorMsg = errData.message;
+          }
+        } catch {
+          // Resposta não-JSON (ex: erro cru do proxy) tratada sem lançar exceção
+        }
+
+        console.warn(`[Neon Admin Sync] Servidor retornou HTTP ${response.status}:`, errorMsg);
         this.resetPendingSync();
-        onProgress?.(100, `Modo offline/local ativo. Registos preservados com segurança no IndexedDB local.`);
+        onProgress?.(100, `Falha na sincronização na nuvem (${errorMsg}). Registos preservados com segurança no IndexedDB local.`);
         return {
-          success: true,
+          success: false,
           offline: true,
           syncedItemsCount: totalCount,
-          message: 'Modo offline/local ativo. Dados mantidos no IndexedDB.',
+          error: errorMsg,
+          message: errorMsg,
         };
       }
 
@@ -1268,12 +1289,12 @@ class NeonDatabaseManager {
         };
       }
 
-      if (!response.ok || (responseData && responseData.success === false)) {
-        const errorMsg = responseData?.message || responseData?.details || responseData?.error || `Erro de sincronização HTTP ${response.status}`;
+      if (responseData && responseData.success === false) {
+        const errorMsg = responseData?.error || responseData?.message || responseData?.details || `Erro de sincronização HTTP ${response.status}`;
         console.warn('[Neon Admin Sync Notice - Dados guardados no IndexedDB]:', errorMsg);
         this.scheduleSilentRetry();
         onProgress?.(100, 'Registos administrativos guardados localmente (IndexedDB).');
-        return { success: false, syncedItemsCount: totalCount, error: errorMsg };
+        return { success: false, syncedItemsCount: totalCount, error: errorMsg, message: errorMsg };
       }
 
       onProgress?.(85, 'A sincronizar dados administrativos globais...');
@@ -1282,8 +1303,9 @@ class NeonDatabaseManager {
       });
 
       this.resetPendingSync();
-      onProgress?.(100, 'Todos os registos administrativos foram gravados no Neon PostgreSQL com sucesso!');
-      return { success: true, syncedItemsCount: responseData?.syncedItemsCount || totalCount };
+      const successMessage = responseData?.message || 'Sincronizado na nuvem com sucesso';
+      onProgress?.(100, successMessage);
+      return { success: true, syncedItemsCount: responseData?.syncedItemsCount || totalCount, message: successMessage };
     } catch (err: any) {
       console.warn('[Neon Admin Sync Warning - Dados guardados no IndexedDB]:', err);
       this.scheduleSilentRetry();
@@ -1620,6 +1642,27 @@ export class CustomAuthService {
       atelie: newAtelie
     };
 
+    try {
+      if (password) {
+        const regRes = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: mailLower,
+            password,
+            nomeAtelie,
+            telefone,
+          }),
+        });
+        const regData = await regRes.json().catch(() => null);
+        if (regData?.accessToken && typeof localStorage !== 'undefined') {
+          localStorage.setItem('jwt_token', regData.accessToken);
+        }
+      }
+    } catch (regErr) {
+      console.warn('[signUp Neon register error]', regErr);
+    }
+
     await this.safeSyncSession({
       email: mailLower,
       displayName: nomeAtelie,
@@ -1788,7 +1831,6 @@ export class CustomAuthService {
 
   async login(email: string, password?: string): Promise<UserSession> {
     const mailLower = email.toLowerCase().trim();
-    const isAdmin = localDb.getAdmins().includes(mailLower);
 
     // Se estiver offline, apenas permite restaurar uma sessão já existente previamente autorizada
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
@@ -1798,114 +1840,96 @@ export class CustomAuthService {
         this.restoreSession();
         if (this.currentSession) return this.currentSession;
       }
-      throw new Error('O início de uma nova sessão requer ligação à internet. Se já utilizou o sistema neste dispositivo, reconecte-se para revalidar a sessão.');
+      throw new Error('O início de uma nova sessão requer ligação à internet activa.');
     }
 
-    if (isAdmin) {
-      const status = await localDb.checkAdminStatus(mailLower);
+    if (!mailLower || !mailLower.includes('@')) {
+      throw new Error('Por favor, introduza um endereço de e-mail válido.');
+    }
 
-      // Se for o primeiro dia de acesso do Administrador (sem senha)
-      if (!status.hasPassword) {
-        if (password && password.length >= 6) {
-          await localDb.setAdminPassword(mailLower, password);
-        } else {
-          const err: any = new Error('Primeiro acesso de Administrador: Por favor, defina a sua palavra-passe de segurança.');
-          err.isFirstAdminAccess = true;
-          err.adminEmail = mailLower;
-          throw err;
-        }
-      } else {
-        if (!password) {
-          throw new Error('Por favor, introduza a sua palavra-passe de Administrador.');
-        }
-        const verify = await localDb.verifyAdminPassword(mailLower, password);
-        if (!verify.match) {
-          throw new Error('Palavra-passe de administrador incorreta. Por favor, tente novamente.');
-        }
-      }
+    if (!password) {
+      throw new Error('Por favor, introduza a sua palavra-passe.');
+    }
 
-      const uid = 'admin_' + mailLower.split('@')[0];
-      localStorage.setItem('ateliepro_current_uid', uid);
-      localStorage.setItem('ateliepro_current_email', mailLower);
+    // 1. Chamada HTTP POST para /api/auth/login para autenticação no Neon DB
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        email: mailLower,
+        password: password,
+      }),
+    });
+
+    let data: any = null;
+    try {
+      data = await res.json();
+    } catch (parseErr) {
+      console.warn('[Login Error] Resposta não-JSON da API de autenticação:', parseErr);
+    }
+
+    // Não permitir o login se a API responder com status de erro (ex: 401 ou 400)
+    if (!res.ok || !data || data.success === false) {
+      const errorMsg = data?.message || 'E-mail ou palavra-passe inválidos.';
+      throw new Error(errorMsg);
+    }
+
+    // 2. Autenticação bem-sucedida
+    const isAdm = Boolean(data.isAdmin || data.user?.role === 'admin');
+    const uid = data.user?.userId || (isAdm ? 'admin_' + mailLower.split('@')[0] : 'user_' + mailLower.split('@')[0]);
+
+    if (data.accessToken && typeof localStorage !== 'undefined') {
+      localStorage.setItem('jwt_token', data.accessToken);
+    }
+    localStorage.setItem('ateliepro_current_uid', uid);
+    localStorage.setItem('ateliepro_current_email', mailLower);
+
+    let atelie: Atelie | null = null;
+    if (isAdm) {
       this.currentSession = { 
         uid, 
         email: mailLower, 
+        name: data.user?.name || 'Administrador Central',
+        displayName: 'Administrador Central',
         role: 'admin',
         isAdmin: true, 
         atelie: null 
       };
       localDb.initAdminRealtimeSync();
-
-      await this.safeSyncSession({
-        email: mailLower,
-        displayName: 'Administrador FlowTailor',
-        uid,
-        authProvider: 'email_neon',
-      });
-
-      this.notify();
-      return this.currentSession;
-    }
-
-    // Procura ateliê existente
-    let atelie = localDb.getAtelies().find(a => a.emailOwner.toLowerCase() === mailLower);
-
-    if (atelie) {
-      localStorage.setItem('ateliepro_current_uid', atelie.id);
-      localStorage.setItem('ateliepro_current_email', mailLower);
-      this.currentSession = { 
-        uid: atelie.id, 
-        email: mailLower, 
-        role: 'atelie_owner',
-        isAdmin: false, 
-        atelie 
-      };
-      localDb.initRealtimeSync(atelie.id);
-      
-      await this.safeSyncSession({
-        email: mailLower,
-        displayName: atelie.nome,
-        uid: atelie.id,
-        authProvider: 'email_neon',
-      });
-
-      this.notify();
-      return this.currentSession;
     } else {
-      const uid = 'atelie_' + (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID().replace(/-/g, '').slice(0, 12) : Date.now().toString(36));
-      const newAtelie: Atelie = {
-        id: uid,
-        nome: `Ateliê de ${email.split('@')[0]}`,
-        emailOwner: mailLower,
-        telefone: '244923000000',
-        plano: 'basico',
-        ativo: true,
-        dataVencimento: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-        criadoEm: new Date().toISOString()
-      };
-      await localDb.saveAtelie(newAtelie);
-
-      localStorage.setItem('ateliepro_current_uid', uid);
-      localStorage.setItem('ateliepro_current_email', mailLower);
+      let existingAtelie = localDb.getAtelies().find(a => a.emailOwner.toLowerCase() === mailLower);
+      if (!existingAtelie) {
+        existingAtelie = {
+          id: uid,
+          nome: data.user?.atelieName || `Ateliê de ${mailLower.split('@')[0]}`,
+          emailOwner: mailLower,
+          telefone: '244923000000',
+          plano: 'basico',
+          ativo: true,
+          dataVencimento: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+          criadoEm: new Date().toISOString(),
+          pais: 'AO',
+          avatarIcon: 'scissors',
+        };
+        await localDb.saveAtelie(existingAtelie);
+      }
+      atelie = existingAtelie;
       this.currentSession = { 
         uid, 
         email: mailLower, 
+        name: existingAtelie.nome,
+        displayName: existingAtelie.nome,
         role: 'atelie_owner', 
         isAdmin: false, 
-        atelie: newAtelie 
+        atelie 
       };
       localDb.initRealtimeSync(uid);
-
-      await this.safeSyncSession({
-        email: mailLower,
-        displayName: newAtelie.nome,
-        uid,
-        authProvider: 'email_neon',
-      });
-
-      this.notify();
-      return this.currentSession;
     }
+
+    this.notify();
+    return this.currentSession;
   }
 
   async logout() {

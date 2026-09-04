@@ -59,6 +59,7 @@ app.use(csrfProtection);
 // 7. Mount Modular Secure API, Auth & Ateliê Routers with '/api' prefix
 app.use('/api/auth', authRouter);
 app.use('/api/atelie', atelieRouter);
+app.use('/api/neon', neonRouter);
 app.use('/api', authRouter);
 app.use('/api', neonRouter);
 app.use('/api', apiRouter);
@@ -66,6 +67,7 @@ app.use('/api', apiRouter);
 // 7.1 Fallback direct mounting if Vercel serverless environment strips the '/api' prefix
 app.use('/auth', authRouter);
 app.use('/atelie', atelieRouter);
+app.use('/neon', neonRouter);
 app.use('/', authRouter);
 app.use('/', neonRouter);
 app.use('/', apiRouter);

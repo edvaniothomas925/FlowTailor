@@ -10,7 +10,6 @@ import ClientesView from './components/ClientesView';
 import PedidosView from './components/PedidosView';
 import RenovarView from './components/RenovarView';
 import AdminView from './components/AdminView';
-import LandingPage from './components/LandingPage';
 import RelatoriosView from './components/RelatoriosView';
 import { SecurityDefenseView } from './components/SecurityDefenseView';
 import { PAISES_CONFIG, formatarMoeda, formatarMoedaSimples, getAtelieCountry, getPrecoPlano } from './lib/localization';
@@ -161,7 +160,6 @@ export default function App() {
     return getOrCreateUserAtelie(currentSession);
   });
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [bypassLanding, setBypassLanding] = useState(false);
   const [authInitialTab, setAuthInitialTab] = useState<'login' | 'register'>('login');
   const [authInitialCountry, setAuthInitialCountry] = useState<'AO' | 'PT' | 'BR'>('AO');
   
@@ -319,6 +317,7 @@ export default function App() {
       if (loginParam === 'success' || token) {
         if (token) {
           localStorage.setItem('flowtailor_jwt_token', token);
+          localStorage.setItem('jwt_token', token);
         }
         if (email && uid) {
           const mailLower = email.toLowerCase().trim();
@@ -366,38 +365,14 @@ export default function App() {
 
   const handleLogout = () => {
     customAuth.logout();
-    setBypassLanding(false);
     refreshSession();
   };
 
   if (!session) {
-    const isInstalledStandalone = typeof window !== 'undefined' && (
-      window.matchMedia('(display-mode: standalone)').matches 
-      || (window.navigator as any).standalone === true 
-      || document.referrer.includes('android-app://')
-    );
-
-    if (!isInstalledStandalone && !bypassLanding) {
-      return (
-        <LandingPage 
-          onStartTrial={(country: 'AO' | 'PT' | 'BR') => {
-            setAuthInitialTab('register');
-            setAuthInitialCountry(country);
-            setBypassLanding(true);
-          }}
-          onLogin={() => {
-            setAuthInitialTab('login');
-            setBypassLanding(true);
-          }}
-        />
-      );
-    }
-
     return (
       <AuthScreen 
         onLoginSuccess={refreshSession} 
         initialTab={authInitialTab}
-        onBackToLanding={!isInstalledStandalone ? () => setBypassLanding(false) : undefined}
         initialCountry={authInitialCountry}
       />
     );
@@ -1052,41 +1027,31 @@ function AuthScreen({ onLoginSuccess, initialTab = 'login', onBackToLanding, ini
 
     setIsSubmittingLogin(true);
     try {
-      // 1. Enviar requisição POST para /api/auth/login
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          email: mailLower,
-          password: senha,
-        }),
-      });
-
-      let data: any = null;
-      try {
-        data = await res.json();
-      } catch (pErr) {
-        console.warn('Erro ao processar JSON de login:', pErr);
-      }
-
-      // Se a API responder com status de erro (ex: 401 ou 400), impede o redirecionamento
-      if (!res.ok || !data || data.success === false) {
-        const errorMsg = 'E-mail ou palavra-passe inválidos.';
-        setErrorMess(errorMsg);
-        toast.error(errorMsg);
-        return;
-      }
-
-      // 2. Apenas se a autenticação for válida, conclui a sessão local e redireciona
       await customAuth.login(mailLower, senha);
       toast.success('Sessão iniciada com sucesso!');
       onLoginSuccess();
     } catch (err: any) {
-      const errorMsg = 'E-mail ou palavra-passe inválidos.';
+      const errorMsg = err?.message || 'E-mail ou palavra-passe inválidos.';
       setErrorMess(errorMsg);
       toast.error(errorMsg);
+    } finally {
+      setIsSubmittingLogin(false);
+    }
+  };
+
+  const handleLoginDemo = async (role: 'demo_atelie' | 'demo_admin') => {
+    setErrorMess('');
+    setIsSubmittingLogin(true);
+    try {
+      await customAuth.loginAsDemo(role);
+      toast.success(
+        role === 'demo_atelie'
+          ? '🧵 Ateliê de Demonstração (Rosa Ramos) carregado com sucesso!'
+          : '🛡️ Painel de Administração Central carregado com sucesso!'
+      );
+      onLoginSuccess();
+    } catch (err: any) {
+      toast.error('Erro ao aceder à demonstração: ' + (err?.message || err));
     } finally {
       setIsSubmittingLogin(false);
     }
@@ -1156,7 +1121,7 @@ function AuthScreen({ onLoginSuccess, initialTab = 'login', onBackToLanding, ini
           onClick={onBackToLanding}
           className="absolute top-4 left-4 sm:top-6 sm:left-6 bg-white/90 hover:bg-white text-slate-700 hover:text-slate-900 text-xs font-bold px-3.5 py-2 border border-slate-200 hover:border-slate-350 rounded-xl flex items-center gap-1.5 shadow-xs transition-all cursor-pointer"
         >
-          ← Voltar à Página Inicial
+          ← Voltar
         </button>
       )}
       
@@ -1875,11 +1840,56 @@ function AuthScreen({ onLoginSuccess, initialTab = 'login', onBackToLanding, ini
             </form>
           )}
 
-          {/* NO DEMO ACC PANEL */}
+          {/* Quick Demo Access for Live Prospecting / Demonstração ao Vivo */}
+          <div className="mt-5 pt-4 border-t border-dashed border-atelier-200">
+            <div className="bg-atelier-50/70 border border-atelier-200/90 rounded-2xl p-4 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5 text-xs font-bold text-atelier-950 font-display">
+                  <Sparkles className="w-4 h-4 text-amber-500 fill-amber-300" />
+                  <span>Demonstração Rápida (Prospecção)</span>
+                </div>
+                <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-200">
+                  1 Toque
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-600 leading-relaxed">
+                Apresente o sistema ao vivo ao cliente sem ter de criar conta ou digitar senhas:
+              </p>
+              <div className="pt-0.5">
+                <button
+                  type="button"
+                  onClick={() => handleLoginDemo('demo_atelie')}
+                  disabled={isSubmittingLogin}
+                  className="w-full py-2.5 px-4 bg-white hover:bg-atelier-100 text-atelier-900 border border-atelier-300 rounded-xl text-xs font-bold transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer hover:border-atelier-500 active:scale-[0.99]"
+                >
+                  <Scissors className="w-4 h-4 text-atelier-700" />
+                  <span>Entrar no Ateliê de Demonstração (Rosa Ramos)</span>
+                </button>
+              </div>
+            </div>
+          </div>
 
         </div>
           </>
         )}
+      </div>
+
+      {/* Footer Support Info for Angola */}
+      <div className="mt-6 text-center space-y-1.5 select-none">
+        <p className="text-xs text-slate-500 flex items-center justify-center gap-1">
+          Dúvidas ou suporte comercial?{' '}
+          <a
+            href="https://wa.me/244923456789?text=Ol%C3%A1%2C%20gostaria%20de%20saber%20mais%20sobre%20o%20FlowTailor%20em%20Angola"
+            target="_blank"
+            rel="noreferrer"
+            className="text-atelier-700 hover:text-atelier-900 font-bold underline inline-flex items-center gap-1"
+          >
+            Falar no WhatsApp 🇦🇴
+          </a>
+        </p>
+        <p className="text-[10px] text-slate-400">
+          FlowTailor by FlowBusiness • Luanda, Angola
+        </p>
       </div>
 
     </div>

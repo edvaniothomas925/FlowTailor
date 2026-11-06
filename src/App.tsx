@@ -11,7 +11,6 @@ import PedidosView from './components/PedidosView';
 import RenovarView from './components/RenovarView';
 import AdminView from './components/AdminView';
 import RelatoriosView from './components/RelatoriosView';
-import { SecurityDefenseView } from './components/SecurityDefenseView';
 import { PAISES_CONFIG, formatarMoeda, formatarMoedaSimples, getAtelieCountry, getPrecoPlano } from './lib/localization';
 
 // Importing notification engine
@@ -321,7 +320,7 @@ export default function App() {
         }
         if (email && uid) {
           const mailLower = email.toLowerCase().trim();
-          const isAdmin = role === 'admin' || localDb.getAdmins().map(a => a.toLowerCase().trim()).includes(mailLower);
+          const isAdmin = localDb.getAdmins().map(a => a.toLowerCase().trim()).includes(mailLower);
           localStorage.setItem('ateliepro_current_uid', uid);
           localStorage.setItem('ateliepro_current_email', mailLower);
 
@@ -566,16 +565,16 @@ export default function App() {
                 
                 <div className="flex items-center gap-2">
                   <div className="text-right hidden sm:block">
-                    <p className="text-xs font-semibold leading-none text-slate-700 truncate max-w-[120px]">
+                    <p className="text-xs font-semibold leading-none text-slate-700 truncate max-w-[140px]">
                       {session.isAdmin 
-                        ? (localStorage.getItem('ateliepro_admin_nome') || 'Administrador') 
+                        ? (session.name || session.displayName || localStorage.getItem('ateliepro_admin_nome') || 'Administrador Central') 
                         : (session.displayName || session.name || (atelieToUse?.nome ? atelieToUse.nome.replace('Ateliê de ', '') : (session.email ? session.email.split('@')[0] : 'Costureira')))}
                     </p>
                     <p className="text-[10px] text-slate-400 mt-0.5 font-mono truncate max-w-[150px]">{session.email}</p>
                   </div>
                   <AtelieAvatar
                     iconKey={atelieToUse?.avatarIcon || (session.isAdmin ? (localStorage.getItem('ateliepro_admin_avatar_icon') || 'scissors') : 'scissors')}
-                    nome={session.isAdmin ? (localStorage.getItem('ateliepro_admin_nome') || 'Administrador') : (session.displayName || session.name || atelieToUse?.nome || 'Ateliê')}
+                    nome={session.isAdmin ? (session.name || session.displayName || localStorage.getItem('ateliepro_admin_nome') || 'Administrador Central') : (session.displayName || session.name || atelieToUse?.nome || 'Ateliê')}
                   />
                 </div>
               </div>
@@ -2138,7 +2137,7 @@ function ConfiguracoesView({ atelie, onRefresh, onNewAlertTriggered }: Configura
   const [syncStageMsg, setSyncStageMsg] = useState<string>('');
 
   // State to manage configuration subtabs
-  const [activeConfigTab, setActiveConfigTab] = useState<'perfil' | 'whatsapp' | 'seguranca'>('perfil');
+  const [activeConfigTab, setActiveConfigTab] = useState<'perfil' | 'whatsapp'>('perfil');
 
   // Template state inside ConfiguracoesView
   const [notifConfig, setNotifConfig] = useState<NotificationSettings>(() => {
@@ -2214,19 +2213,8 @@ function ConfiguracoesView({ atelie, onRefresh, onNewAlertTriggered }: Configura
     };
   }, []);
 
-  useEffect(() => {
-    if (atelie && atelie.plano === 'basico' && syncMode !== 'offline_local') {
-      setSyncMode('offline_local');
-      localStorage.setItem('flowtailor_sync_mode', 'offline_local');
-    }
-  }, [atelie, syncMode]);
-
-  // Sync mode toggle handler
+  // Hybrid synchronization is enabled by default to ensure real-time persistence with Neon PostgreSQL
   const handleToggleSyncMode = (mode: 'hybrid' | 'offline_local') => {
-    if (mode === 'hybrid' && atelie && atelie.plano === 'basico') {
-      toast.error('O backup na nuvem com sincronização híbrida automática é um benefício exclusivo do plano Pro Completo. Ative o plano completo para usufruir da segurança de dados avançada!');
-      return;
-    }
     setSyncMode(mode);
     localStorage.setItem('flowtailor_sync_mode', mode);
     localDb.setStorageMode(mode === 'offline_local' ? 'offline' : 'hybrid');
@@ -2353,17 +2341,6 @@ function ConfiguracoesView({ atelie, onRefresh, onNewAlertTriggered }: Configura
             <span className="text-[9px] uppercase tracking-wide font-bold text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">Novo</span>
           </button>
         )}
-        <button
-          onClick={() => setActiveConfigTab('seguranca')}
-          className={`py-2.5 px-4 font-display text-sm font-bold border-b-2 -mb-px transition-all flex items-center gap-1.5 cursor-pointer ${
-            activeConfigTab === 'seguranca'
-              ? 'border-emerald-600 text-emerald-950 border-b-2 font-bold'
-              : 'border-transparent text-slate-500 hover:text-slate-700 font-medium'
-          }`}
-        >
-          <span>🛡️ Cibersegurança & Back-End</span>
-          <span className="text-[9px] uppercase tracking-wide font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">Blindado</span>
-        </button>
       </div>
 
       {activeConfigTab === 'perfil' ? (
@@ -2813,8 +2790,6 @@ function ConfiguracoesView({ atelie, onRefresh, onNewAlertTriggered }: Configura
             </div>
           </div>
         )
-      ) : activeConfigTab === 'seguranca' ? (
-        <SecurityDefenseView />
       ) : null}
     </div>
   );

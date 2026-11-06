@@ -381,6 +381,7 @@ router.get('/neon/encomendas', checkDbAvailable, async (req: Request, res: Respo
       status: e.estado || 'em_andamento',
       prazoEntrega: e.prazo_entrega ? e.prazo_entrega.toISOString() : new Date().toISOString(),
       fotoReferencia: e.foto_referencia || '',
+      fotoReferenciaUrl: e.foto_referencia || '',
       observacoes: e.observacoes || '',
       criadoEm: e.criado_em.toISOString(),
       atualizadoEm: e.criado_em.toISOString(),
@@ -411,7 +412,7 @@ router.post('/neon/encomendas', checkDbAvailable, async (req: Request, res: Resp
     const sinal_pago = body.sinalPago != null ? String(body.sinalPago) : (body.sinal_pago != null ? String(body.sinal_pago) : '0');
     const estado = body.status || body.estado || 'em_andamento';
     const prazo_entrega = body.prazoEntrega || body.dataEntrega || body.prazo_entrega;
-    const foto_referencia = body.fotoReferencia || body.foto_referencia || null;
+    const foto_referencia = body.fotoReferenciaUrl || body.fotoReferencia || body.foto_referencia || null;
     const observacoes = body.observacoes || null;
 
     if (!id || !atelie_id || !descricao) {
@@ -566,6 +567,26 @@ router.post('/neon/medidas', checkDbAvailable, async (req: Request, res: Respons
     }
 
     const db = getDb();
+
+    // Assegura ateliê para chave estrangeira
+    await db
+      .insert(atelies)
+      .values({
+        id: atelie_id,
+        nome: `Ateliê ${atelie_id}`,
+        email: `${atelie_id}@ateliepro.local`,
+      })
+      .onConflictDoNothing();
+
+    // Assegura cliente para chave estrangeira
+    await db
+      .insert(clientes)
+      .values({
+        id: cliente_id,
+        atelie_id,
+        nome: 'Cliente',
+      })
+      .onConflictDoNothing();
 
     const inserted = await db
       .insert(medidas)
@@ -791,7 +812,7 @@ router.post('/neon/configuracoes', checkDbAvailable, async (req: Request, res: R
  * Listar administradores
  */
 router.get('/neon/admins', checkDbAvailable, async (req: Request, res: Response) => {
-  const initialAdmins = ['admin@flowtailor.ao'];
+  const initialAdmins = Array.from(INITIAL_AUTHORIZED_ADMINS);
   try {
     await ensureAdminColumnsExist();
     const db = getDb();
@@ -806,11 +827,14 @@ router.get('/neon/admins', checkDbAvailable, async (req: Request, res: Response)
       result = await db.select().from(admins);
     }
 
-    const emailList = result.map(a => a.email.toLowerCase());
+    // Apenas emails que pertencem à lista autorizada ou validados
+    const emailList = result
+      .map(a => a.email ? a.email.toLowerCase().trim() : '')
+      .filter(em => em && initialAdmins.includes(em));
     const merged = Array.from(new Set([...initialAdmins, ...emailList]));
 
     const details = merged.map(email => {
-      const record = result.find(r => r.email.toLowerCase() === email.toLowerCase());
+      const record = result.find(r => r.email && r.email.toLowerCase() === email.toLowerCase());
       return {
         email,
         hasPassword: Boolean(record?.senha_hash),
@@ -1410,15 +1434,16 @@ router.post(['/neon/sync-admin', '/sync-admin'], async (req: Request, res: Respo
     const sql = getSql();
     let count = 0;
 
-    // 4. UPSERT Administrador no Neon DB com try/catch e fallback
-    if (targetAdminEmail && targetAdminEmail.includes('@')) {
+    // 4. UPSERT Administrador no Neon DB (Apenas para Administradores Autorizados)
+    const isTargetAdmin = await isAuthorizedAdminEmail(targetAdminEmail);
+    if (isTargetAdmin) {
       try {
         await sql`
           INSERT INTO admins (
             email, nome, telefone, avatar, avatar_icon, modo_armazenamento, storage_mode, criado_em
           ) VALUES (
             ${targetAdminEmail},
-            ${safeNome},
+            ${safeNome || 'Administrador'},
             ${safeTelefone},
             ${safeAvatar},
             ${safeAvatar},
@@ -1456,6 +1481,8 @@ router.post(['/neon/sync-admin', '/sync-admin'], async (req: Request, res: Respo
           });
         }
       }
+    } else {
+      console.log(`[sync-admin] Ignorando upsert na tabela admins para conta de ateliê regular: ${targetAdminEmail}`);
     }
 
     // 5. UPSERT Configurações (parâmetros bancários e perfil global)

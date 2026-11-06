@@ -44,7 +44,7 @@ const DEFAULT_CONFIGS: ConfiguracaoPagamento = {
   whatsappAdmin: '244923456789'
 };
 
-const INITIAL_ADMINS = ['admin@flowtailor.ao'];
+const INITIAL_ADMINS = ['admin@flowtailor.ao', 'edvaniothomas925@gmail.com'];
 
 const INITIAL_ATELIES: Atelie[] = [
   {
@@ -356,17 +356,18 @@ class NeonDatabaseManager {
       localStorage.removeItem('user_secret');
       localStorage.removeItem('auth_token');
 
-      // Purge any legacy email references stored in ateliepro_admins
+      // Purge any legacy non-admin emails stored in ateliepro_admins
       const rawAdmins = localStorage.getItem('ateliepro_admins');
       if (rawAdmins) {
         try {
           const list = JSON.parse(rawAdmins);
           if (Array.isArray(list)) {
-            const sanitized = list.filter((em: string) => typeof em === 'string' && !em.includes('edvanio') && !em.includes('@gmail.com'));
-            localStorage.setItem('ateliepro_admins', JSON.stringify(sanitized));
+            const validAdmins = ['admin@flowtailor.ao', 'edvaniothomas925@gmail.com'];
+            const sanitized = list.filter((em: string) => typeof em === 'string' && validAdmins.includes(em.toLowerCase().trim()));
+            localStorage.setItem('ateliepro_admins', JSON.stringify(sanitized.length > 0 ? sanitized : validAdmins));
           }
         } catch {
-          localStorage.removeItem('ateliepro_admins');
+          localStorage.setItem('ateliepro_admins', JSON.stringify(['admin@flowtailor.ao', 'edvaniothomas925@gmail.com']));
         }
       }
     }
@@ -619,28 +620,46 @@ class NeonDatabaseManager {
         idbSave('atelies', resAtelie.value.atelie).catch(() => {});
       }
 
-      if (resClientes.status === 'fulfilled' && resClientes.value?.clientes) {
+      if (resClientes.status === 'fulfilled' && Array.isArray(resClientes.value?.clientes)) {
         const raw = localStorage.getItem('ateliepro_clientes');
         const data = raw ? JSON.parse(raw) : {};
-        data[atelieId] = resClientes.value.clientes;
+        const localList: Cliente[] = data[atelieId] || [];
+        const remoteList: Cliente[] = resClientes.value.clientes;
+        const mergedMap = new Map<string, Cliente>();
+        localList.forEach(c => c?.id && mergedMap.set(c.id, c));
+        remoteList.forEach(c => c?.id && mergedMap.set(c.id, c));
+        const merged = Array.from(mergedMap.values());
+        data[atelieId] = merged;
         localStorage.setItem('ateliepro_clientes', JSON.stringify(data));
-        idbSaveBulk('clientes', resClientes.value.clientes.map((c: any) => ({ ...c, atelieId }))).catch(() => {});
+        idbSaveBulk('clientes', merged.map((c: any) => ({ ...c, atelieId }))).catch(() => {});
       }
 
-      if (resPedidos.status === 'fulfilled' && resPedidos.value?.encomendas) {
+      if (resPedidos.status === 'fulfilled' && Array.isArray(resPedidos.value?.encomendas)) {
         const raw = localStorage.getItem('ateliepro_pedidos');
         const data = raw ? JSON.parse(raw) : {};
-        data[atelieId] = resPedidos.value.encomendas;
+        const localList: Pedido[] = data[atelieId] || [];
+        const remoteList: Pedido[] = resPedidos.value.encomendas;
+        const mergedMap = new Map<string, Pedido>();
+        localList.forEach(p => p?.id && mergedMap.set(p.id, p));
+        remoteList.forEach(p => p?.id && mergedMap.set(p.id, p));
+        const merged = Array.from(mergedMap.values());
+        data[atelieId] = merged;
         localStorage.setItem('ateliepro_pedidos', JSON.stringify(data));
-        idbSaveBulk('encomendas', resPedidos.value.encomendas.map((p: any) => ({ ...p, atelieId }))).catch(() => {});
+        idbSaveBulk('encomendas', merged.map((p: any) => ({ ...p, atelieId }))).catch(() => {});
       }
 
-      if (resMedidas.status === 'fulfilled' && resMedidas.value?.medidas) {
+      if (resMedidas.status === 'fulfilled' && Array.isArray(resMedidas.value?.medidas)) {
         const raw = localStorage.getItem('ateliepro_medidas');
         const data = raw ? JSON.parse(raw) : {};
-        data[atelieId] = resMedidas.value.medidas;
+        const localList: Medidas[] = data[atelieId] || [];
+        const remoteList: Medidas[] = resMedidas.value.medidas;
+        const mergedMap = new Map<string, Medidas>();
+        localList.forEach(m => m?.id && mergedMap.set(m.id, m));
+        remoteList.forEach(m => m?.id && mergedMap.set(m.id, m));
+        const merged = Array.from(mergedMap.values());
+        data[atelieId] = merged;
         localStorage.setItem('ateliepro_medidas', JSON.stringify(data));
-        idbSaveBulk('medidas', resMedidas.value.medidas.map((m: any) => ({ ...m, atelieId }))).catch(() => {});
+        idbSaveBulk('medidas', merged.map((m: any) => ({ ...m, atelieId }))).catch(() => {});
       }
 
       if (resConfigs.status === 'fulfilled' && resConfigs.value?.configs) {
@@ -728,7 +747,8 @@ class NeonDatabaseManager {
   // ===========================================================================
   getAdmins(): string[] {
     const raw = localStorage.getItem('ateliepro_admins');
-    return raw ? JSON.parse(raw) : INITIAL_ADMINS;
+    const stored: string[] = raw ? JSON.parse(raw) : INITIAL_ADMINS;
+    return Array.from(new Set([...INITIAL_ADMINS, ...stored])).filter(e => typeof e === 'string' && INITIAL_ADMINS.includes(e.toLowerCase().trim()));
   }
 
   async checkAdminStatus(email: string): Promise<{ isAdmin: boolean; hasPassword: boolean; exists: boolean }> {
@@ -871,6 +891,16 @@ class NeonDatabaseManager {
     }
   }
 
+  private getAuthHeaders(targetAtelieId?: string): Record<string, string> {
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('jwt_token') : null;
+    const atId = targetAtelieId || this.activeAtelieId;
+    return {
+      'Content-Type': 'application/json',
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+      ...(atId ? { 'x-atelie-id': atId } : {}),
+    };
+  }
+
   // ===========================================================================
   // 3. ATELIÊS
   // ===========================================================================
@@ -899,11 +929,15 @@ class NeonDatabaseManager {
 
     this.incrementPendingSync();
     try {
-      await fetch('/api/neon/atelies', {
+      const res = await fetch('/api/neon/atelies', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.getAuthHeaders(atelie.id),
         body: JSON.stringify(atelie),
       });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => null);
+        console.warn(`[Neon saveAtelie HTTP ${res.status}]`, errData);
+      }
     } catch (err) {
       handleSyncError(err, OperationType.WRITE, `atelies/${atelie.id}`);
     }
@@ -936,11 +970,15 @@ class NeonDatabaseManager {
 
     this.incrementPendingSync();
     try {
-      await fetch('/api/neon/clientes', {
+      const res = await fetch('/api/neon/clientes', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.getAuthHeaders(atelieId),
         body: JSON.stringify({ ...cliente, atelieId }),
       });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => null);
+        console.warn(`[Neon saveCliente HTTP ${res.status}]`, errData);
+      }
     } catch (err) {
       handleSyncError(err, OperationType.WRITE, `clientes/${cliente.id}`);
     }
@@ -962,6 +1000,7 @@ class NeonDatabaseManager {
     try {
       await fetch(`/api/neon/clientes/${clienteId}?atelie_id=${encodeURIComponent(atelieId)}`, {
         method: 'DELETE',
+        headers: this.getAuthHeaders(atelieId),
       });
     } catch (err) {
       handleSyncError(err, OperationType.DELETE, `clientes/${clienteId}`);
@@ -999,11 +1038,15 @@ class NeonDatabaseManager {
 
     this.incrementPendingSync();
     try {
-      await fetch('/api/neon/medidas', {
+      const res = await fetch('/api/neon/medidas', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.getAuthHeaders(atelieId),
         body: JSON.stringify({ ...medidas, atelieId }),
       });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => null);
+        console.warn(`[Neon saveMedidas HTTP ${res.status}]`, errData);
+      }
     } catch (err) {
       handleSyncError(err, OperationType.WRITE, `medidas/${medidas.id}`);
     }
@@ -1040,11 +1083,24 @@ class NeonDatabaseManager {
 
     this.incrementPendingSync();
     try {
-      await fetch('/api/neon/encomendas', {
+      const res = await fetch('/api/neon/encomendas', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...pedido, atelieId }),
+        headers: this.getAuthHeaders(atelieId),
+        body: JSON.stringify({
+          ...pedido,
+          atelieId,
+          descricaoPeca: pedido.descricao,
+          fotoReferencia: pedido.fotoReferenciaUrl,
+          fotoReferenciaUrl: pedido.fotoReferenciaUrl,
+          valor_kz: pedido.valor,
+          sinal_pago: pedido.sinalPago,
+          prazoEntrega: pedido.prazoEntrega,
+        }),
       });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => null);
+        console.warn(`[Neon savePedido HTTP ${res.status}]`, errData);
+      }
     } catch (err) {
       handleSyncError(err, OperationType.WRITE, `encomendas/${pedido.id}`);
     }
@@ -1344,7 +1400,7 @@ export class CustomAuthService {
           }
           if (emailParam && uidParam) {
             const mailLower = emailParam.toLowerCase().trim();
-            const isAdmin = roleParam === 'admin' || localDb.getAdmins().map(a => a.toLowerCase().trim()).includes(mailLower);
+            const isAdmin = localDb.getAdmins().map(a => a.toLowerCase().trim()).includes(mailLower);
             localStorage.setItem('ateliepro_current_uid', uidParam);
             localStorage.setItem('ateliepro_current_email', mailLower);
             
@@ -1429,11 +1485,12 @@ export class CustomAuthService {
         localDb.saveAtelie(atelie);
       }
 
+      const adminName = localStorage.getItem('ateliepro_admin_nome') || 'Administrador Central';
       this.currentSession = { 
         uid, 
         email: mailLower, 
-        name: isEmailAdmin ? (localStorage.getItem('ateliepro_admin_nome') || 'Administrador') : userName,
-        displayName: userName,
+        name: isEmailAdmin ? adminName : (atelie?.nome || userName),
+        displayName: isEmailAdmin ? adminName : userName,
         role: isEmailAdmin ? 'admin' : 'atelie_owner',
         isAdmin: isEmailAdmin, 
         atelie: isEmailAdmin ? null : atelie 
@@ -1555,11 +1612,12 @@ export class CustomAuthService {
       if (backendAdmin) {
         localStorage.setItem('ateliepro_current_uid', uid);
         localStorage.setItem('ateliepro_current_email', mailLower);
+        const resolvedAdminName = userName || localStorage.getItem('ateliepro_admin_nome') || 'Administrador Central';
         this.currentSession = { 
           uid, 
           email: mailLower, 
-          name: localStorage.getItem('ateliepro_admin_nome') || 'Administrador',
-          displayName: 'Administrador',
+          name: resolvedAdminName,
+          displayName: resolvedAdminName,
           role: 'admin',
           isAdmin: true, 
           atelie: null 

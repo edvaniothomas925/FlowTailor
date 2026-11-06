@@ -12,6 +12,8 @@ import { logSecurityEvent } from '../services/auditLogger.js';
  * - Enables credentials for HttpOnly cookie session management
  */
 const CLOUD_RUN_STRICT_REGEX = /^https:\/\/[a-z0-9-]+\.run\.app$/;
+const VERCEL_STRICT_REGEX = /^https:\/\/[a-z0-9-._]+\.vercel\.app$/;
+const AI_STUDIO_REGEX = /^https:\/\/[a-z0-9-._]+(\.googleusercontent\.com|\.web\.app|\.firebaseapp\.com)$/;
 const LOCALHOST_STRICT_REGEX = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
 
 export function getCorsOptions(): CorsOptions {
@@ -20,12 +22,20 @@ export function getCorsOptions(): CorsOptions {
   if (env.APP_URL) allowedSet.add(env.APP_URL.trim());
   if (env.VITE_APP_URL) allowedSet.add(env.VITE_APP_URL.trim());
   if (process.env.VITE_APP_URL) allowedSet.add(process.env.VITE_APP_URL.trim());
+  if (process.env.VERCEL_URL) {
+    const vUrl = process.env.VERCEL_URL.startsWith('http') ? process.env.VERCEL_URL : `https://${process.env.VERCEL_URL}`;
+    allowedSet.add(vUrl.trim());
+  }
 
   if (env.CORS_ORIGIN) {
-    env.CORS_ORIGIN.split(',')
-      .map((o) => o.trim())
-      .filter(Boolean)
-      .forEach((o) => allowedSet.add(o));
+    if (env.CORS_ORIGIN === '*') {
+      // allow wildcard if explicitly set
+    } else {
+      env.CORS_ORIGIN.split(',')
+        .map((o) => o.trim())
+        .filter(Boolean)
+        .forEach((o) => allowedSet.add(o));
+    }
   }
 
   const isDev = env.NODE_ENV === 'development';
@@ -37,13 +47,21 @@ export function getCorsOptions(): CorsOptions {
         return callback(null, true);
       }
 
-      // 1. Exact match against explicitly configured domains (APP_URL, VITE_APP_URL, CORS_ORIGIN)
+      if (env.CORS_ORIGIN === '*') {
+        return callback(null, true);
+      }
+
+      // 1. Exact match against explicitly configured domains (APP_URL, VITE_APP_URL, CORS_ORIGIN, VERCEL_URL)
       if (allowedSet.has(origin)) {
         return callback(null, true);
       }
 
-      // 2. Strict anchored Regex match for Cloud Run preview and production environments
-      if (CLOUD_RUN_STRICT_REGEX.test(origin)) {
+      // 2. Strict anchored Regex match for Cloud Run, Vercel, and AI Studio environments
+      if (
+        CLOUD_RUN_STRICT_REGEX.test(origin) ||
+        VERCEL_STRICT_REGEX.test(origin) ||
+        AI_STUDIO_REGEX.test(origin)
+      ) {
         return callback(null, true);
       }
 

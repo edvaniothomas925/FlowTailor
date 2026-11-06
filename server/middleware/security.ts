@@ -3,6 +3,8 @@ import { env } from '../config/env.js';
 import { logSecurityEvent } from '../services/auditLogger.js';
 
 const CLOUD_RUN_STRICT_REGEX = /^https:\/\/[a-z0-9-]+\.run\.app$/;
+const VERCEL_STRICT_REGEX = /^https:\/\/[a-z0-9-._]+\.vercel\.app$/;
+const AI_STUDIO_REGEX = /^https:\/\/[a-z0-9-._]+(\.googleusercontent\.com|\.web\.app|\.firebaseapp\.com)$/;
 const LOCALHOST_STRICT_REGEX = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
 
 /**
@@ -112,10 +114,25 @@ export function csrfProtection(req: Request, res: Response, next: NextFunction) 
     return next();
   }
 
+  // Same-origin check: if origin matches request host, allow immediately
+  const reqHost = req.get('x-forwarded-host') || req.get('host');
+  if (reqHost) {
+    try {
+      const originHost = new URL(origin).host;
+      if (originHost === reqHost) {
+        return next();
+      }
+    } catch {}
+  }
+
   const allowedSet = new Set<string>();
   if (env.APP_URL) allowedSet.add(env.APP_URL.trim());
   if (env.VITE_APP_URL) allowedSet.add(env.VITE_APP_URL.trim());
   if (process.env.VITE_APP_URL) allowedSet.add(process.env.VITE_APP_URL.trim());
+  if (process.env.VERCEL_URL) {
+    const vUrl = process.env.VERCEL_URL.startsWith('http') ? process.env.VERCEL_URL : `https://${process.env.VERCEL_URL}`;
+    allowedSet.add(vUrl.trim());
+  }
   if (env.CORS_ORIGIN) {
     env.CORS_ORIGIN.split(',')
       .map(o => o.trim())
@@ -128,6 +145,8 @@ export function csrfProtection(req: Request, res: Response, next: NextFunction) 
   if (
     allowedSet.has(origin) ||
     CLOUD_RUN_STRICT_REGEX.test(origin) ||
+    VERCEL_STRICT_REGEX.test(origin) ||
+    AI_STUDIO_REGEX.test(origin) ||
     (isDev && LOCALHOST_STRICT_REGEX.test(origin))
   ) {
     return next();

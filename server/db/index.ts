@@ -227,14 +227,26 @@ export async function ensureTablesExist(): Promise<{ success: boolean; error?: s
 
     // Inserção de Administradores Iniciais
     await sql`
-      INSERT INTO admins (email, senha_hash, senha_definida_em) VALUES 
-        ('admin@flowtailor.ao', '$2b$10$Md5fobe5OhlKFDJWJe3xB.ATvluQj9kGqc7/yivcLl6Xn8DBr7S0i', NOW())
+      INSERT INTO admins (email, senha_hash, senha_definida_em, nome) VALUES 
+        ('admin@flowtailor.ao', '$2b$10$Md5fobe5OhlKFDJWJe3xB.ATvluQj9kGqc7/yivcLl6Xn8DBr7S0i', NOW(), 'Administrador FlowTailor'),
+        ('edvaniothomas925@gmail.com', '$2b$10$Md5fobe5OhlKFDJWJe3xB.ATvluQj9kGqc7/yivcLl6Xn8DBr7S0i', NOW(), 'Edvânio Tomás')
       ON CONFLICT (email) DO NOTHING
     `;
 
+    // Purga de segurança: garante que contas comuns de costureiras/ateliês nunca permaneçam na tabela de administradores
+    try {
+      await sql`
+        DELETE FROM admins 
+        WHERE LOWER(email) NOT IN ('admin@flowtailor.ao', 'edvaniothomas925@gmail.com')
+      `;
+    } catch (purgeErr) {
+      console.warn('[NEON] Purge admins warning:', purgeErr);
+    }
+
     await sql`
       INSERT INTO usuarios (id, email, nome, senha_hash, role) VALUES
-        ('admin_flowtailor', 'admin@flowtailor.ao', 'Administrador Central', '$2b$10$Md5fobe5OhlKFDJWJe3xB.ATvluQj9kGqc7/yivcLl6Xn8DBr7S0i', 'admin')
+        ('admin_flowtailor', 'admin@flowtailor.ao', 'Administrador Central', '$2b$10$Md5fobe5OhlKFDJWJe3xB.ATvluQj9kGqc7/yivcLl6Xn8DBr7S0i', 'admin'),
+        ('admin_edvanio', 'edvaniothomas925@gmail.com', 'Edvânio Tomás', '$2b$10$Md5fobe5OhlKFDJWJe3xB.ATvluQj9kGqc7/yivcLl6Xn8DBr7S0i', 'admin')
       ON CONFLICT (email) DO NOTHING
     `;
 
@@ -264,6 +276,7 @@ export async function ensureTablesExist(): Promise<{ success: boolean; error?: s
  */
 export const INITIAL_AUTHORIZED_ADMINS: readonly string[] = [
   'admin@flowtailor.ao',
+  'edvaniothomas925@gmail.com',
 ];
 
 /**

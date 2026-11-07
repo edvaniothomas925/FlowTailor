@@ -15,6 +15,7 @@ import {
   logSecurityEvent,
 } from '../services/auditLogger.js';
 import { checkNeonConnection, getNeonDatabaseUrl } from '../db/neon.js';
+import { requireAuth, requireRole } from '../middleware/authJwt.js';
 
 const router = Router();
 
@@ -103,25 +104,8 @@ router.get('/security/status', (req: Request, res: Response) => {
   });
 });
 
-// 3. Security Audit Logs (Protected endpoint)
-router.get('/security/audit-logs', (req: Request, res: Response) => {
-  const authHeader = req.headers['authorization'];
-  const forwarded = req.headers['x-forwarded-for'];
-  const ip = (typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : req.socket.remoteAddress) || '127.0.0.1';
-
-  // Check if caller provides authorization or admin session
-  if (!authHeader) {
-    logSecurityEvent({
-      type: 'AUTH_FAILURE',
-      severity: 'WARN',
-      ip,
-      path: req.originalUrl,
-      method: req.method,
-      details: 'Unauthorized attempt to inspect security audit logs.',
-    });
-    return res.status(401).json({ error: 'Acesso restrito a administradores autorizados.' });
-  }
-
+// 3. Security Audit Logs (Protected endpoint - Admins Only)
+router.get('/security/audit-logs', requireAuth, requireRole('admin'), (req: Request, res: Response) => {
   const logs = getAuditLogs(50);
   res.json({
     logs,

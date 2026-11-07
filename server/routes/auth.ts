@@ -1441,7 +1441,7 @@ router.post('/set-password', async (req: Request, res: Response) => {
  */
 router.post('/register', async (req: Request, res: Response) => {
   try {
-    const { email, password, nomeAtelie, nomeDono, telefone, plano } = req.body;
+    const { email, password, nomeAtelie, nomeDono, telefone, plano, atelieId } = req.body;
     if (!email || typeof email !== 'string' || !email.includes('@')) {
       return res.status(400).json({ success: false, message: 'Endereço de e-mail válido é obrigatório.' });
     }
@@ -1452,9 +1452,9 @@ router.post('/register', async (req: Request, res: Response) => {
     const mailLower = email.toLowerCase().trim();
     const isAdmin = await isAuthorizedAdminEmail(mailLower);
     const hashedPassword = await hashPassword(password);
-    const userId = isAdmin 
+    const userId = atelieId || (isAdmin 
       ? `admin_${mailLower.split('@')[0]}` 
-      : `user_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`;
+      : `user_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`);
     const computedName = (nomeAtelie || (isAdmin ? 'Administração Central' : `Ateliê de ${mailLower.split('@')[0]}`)).trim();
 
     const dbUrl = getDatabaseUrl();
@@ -1499,6 +1499,7 @@ router.post('/register', async (req: Request, res: Response) => {
       userId,
       email: mailLower,
       role: isAdmin ? 'admin' : 'atelie_owner',
+      atelieId: isAdmin ? undefined : userId,
       atelieName: computedName,
       authProvider: 'email',
       sessionCreated: new Date().toISOString(),

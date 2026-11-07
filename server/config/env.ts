@@ -18,7 +18,7 @@ const envSchema = z.object({
   DATABASE_URL: z.string().optional(),
   NEON_DATABASE_URL: z.string().optional(),
   NEON_AUTH_URL: z.string().default('https://ep-wispy-moon-zab2krf0.neonauth.c-2.eu-west-2.aws.neon.tech/neondb/auth'),
-  NEON_JWKS_URL: z.string().default('https://ep-wispy-moon-zab2krf0.neonauth.c-2.eu-west-2.aws.neon.tech/neondb/auth/.well-known/jwks.json'),
+  NEON_JWKS_URL: z.string().optional(),
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   GOOGLE_OAUTH_REDIRECT_URI: z.string().optional(),
@@ -31,8 +31,15 @@ if (!parsed.success) {
   console.error('❌ [CONFIG] Configuração de variáveis de ambiente inválida:', parsed.error.format());
 }
 
+const rawNeonAuth = process.env.NEON_AUTH_URL || 'https://ep-wispy-moon-zab2krf0.neonauth.c-2.eu-west-2.aws.neon.tech/neondb/auth';
+const derivedJwks = process.env.NEON_JWKS_URL || `${rawNeonAuth.replace(/\/+$/, '')}/.well-known/jwks.json`;
+
 export const env = parsed.success
-  ? parsed.data
+  ? {
+      ...parsed.data,
+      DATABASE_URL: parsed.data.DATABASE_URL || parsed.data.NEON_DATABASE_URL,
+      NEON_JWKS_URL: parsed.data.NEON_JWKS_URL || derivedJwks,
+    }
   : {
       NODE_ENV: (process.env.NODE_ENV as 'development' | 'production' | 'test') || 'development',
       PORT: Number(process.env.PORT) || 3000,
@@ -44,10 +51,10 @@ export const env = parsed.success
       CORS_ORIGIN: process.env.CORS_ORIGIN || '',
       RATE_LIMIT_WINDOW_MS: Number(process.env.RATE_LIMIT_WINDOW_MS) || 60000,
       RATE_LIMIT_MAX_REQUESTS: Number(process.env.RATE_LIMIT_MAX_REQUESTS) || 120,
-      DATABASE_URL: process.env.DATABASE_URL,
+      DATABASE_URL: process.env.DATABASE_URL || process.env.NEON_DATABASE_URL,
       NEON_DATABASE_URL: process.env.NEON_DATABASE_URL,
-      NEON_AUTH_URL: process.env.NEON_AUTH_URL || 'https://ep-wispy-moon-zab2krf0.neonauth.c-2.eu-west-2.aws.neon.tech/neondb/auth',
-      NEON_JWKS_URL: process.env.NEON_JWKS_URL || 'https://ep-wispy-moon-zab2krf0.neonauth.c-2.eu-west-2.aws.neon.tech/neondb/auth/.well-known/jwks.json',
+      NEON_AUTH_URL: rawNeonAuth,
+      NEON_JWKS_URL: derivedJwks,
       GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
       GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
       GOOGLE_OAUTH_REDIRECT_URI: process.env.GOOGLE_OAUTH_REDIRECT_URI,

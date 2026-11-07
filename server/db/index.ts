@@ -225,11 +225,11 @@ export async function ensureTablesExist(): Promise<{ success: boolean; error?: s
       console.warn('[NEON] Aviso ao criar índices:', idxErr);
     }
 
-    // Inserção de Administradores Iniciais
+    // Inserção de Administradores Iniciais (sem hashes fixas no código; senhas definidas de forma segura pelo utilizador)
     await sql`
-      INSERT INTO admins (email, senha_hash, senha_definida_em, nome) VALUES 
-        ('admin@flowtailor.ao', '$2b$10$Md5fobe5OhlKFDJWJe3xB.ATvluQj9kGqc7/yivcLl6Xn8DBr7S0i', NOW(), 'Administrador FlowTailor'),
-        ('edvaniothomas925@gmail.com', '$2b$10$Md5fobe5OhlKFDJWJe3xB.ATvluQj9kGqc7/yivcLl6Xn8DBr7S0i', NOW(), 'Edvânio Tomás')
+      INSERT INTO admins (email, nome) VALUES 
+        ('admin@flowtailor.ao', 'Administrador FlowTailor'),
+        ('edvaniothomas925@gmail.com', 'Edvânio Tomás')
       ON CONFLICT (email) DO NOTHING
     `;
 
@@ -244,9 +244,9 @@ export async function ensureTablesExist(): Promise<{ success: boolean; error?: s
     }
 
     await sql`
-      INSERT INTO usuarios (id, email, nome, senha_hash, role) VALUES
-        ('admin_flowtailor', 'admin@flowtailor.ao', 'Administrador Central', '$2b$10$Md5fobe5OhlKFDJWJe3xB.ATvluQj9kGqc7/yivcLl6Xn8DBr7S0i', 'admin'),
-        ('admin_edvanio', 'edvaniothomas925@gmail.com', 'Edvânio Tomás', '$2b$10$Md5fobe5OhlKFDJWJe3xB.ATvluQj9kGqc7/yivcLl6Xn8DBr7S0i', 'admin')
+      INSERT INTO usuarios (id, email, nome, role) VALUES
+        ('admin_flowtailor', 'admin@flowtailor.ao', 'Administrador Central', 'admin'),
+        ('admin_edvanio', 'edvaniothomas925@gmail.com', 'Edvânio Tomás', 'admin')
       ON CONFLICT (email) DO NOTHING
     `;
 

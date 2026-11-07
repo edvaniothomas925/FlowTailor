@@ -79,9 +79,131 @@ function checkDbAvailable(req: Request, res: Response, next: () => void) {
 }
 
 /**
+ * Validador rigoroso de Autenticação e Isolamento Multi-Tenant (BOLA / IDOR)
+ * Garante que:
+ * 1. Pedidos não autenticados (sem token JWT válido) são imediatamente rejeitados com HTTP 401.
+ * 2. Nenhum utilizador comum (costureira/proprietário) consiga aceder, visualizar ou alterar dados de outro ateliê (HTTP 403).
+ * 3. Apenas administradores centrais autorizados possuem visibilidade global.
+ */
+async function authorizeTenantRequest(
+  req: Request,
+  res: Response,
+  targetAtelieId?: string | null
+): Promise<boolean> {
+  const token = extractToken(req);
+  if (!token) {
+    res.status(401).json({
+      error: 'Autenticação necessária. Por favor, inicie sessão no FlowTailor.',
+      code: 'UNAUTHORIZED',
+    });
+    return false;
+  }
+
+  const verified = verifyJwtToken(token);
+  if (!verified.valid || !verified.payload) {
+    res.status(401).json({
+      error: 'Sessão inválida ou expirada. Inicie sessão novamente.',
+      code: 'INVALID_TOKEN',
+    });
+    return false;
+  }
+
+  req.user = verified.payload;
+
+  // Administradores centrais autorizados têm permissão para suporte/auditoria
+  const mailLower = (req.user.email || '').toLowerCase().trim();
+  if (
+    req.user.role === 'admin' ||
+    (mailLower && (INITIAL_AUTHORIZED_ADMINS.includes(mailLower) || (await isAuthorizedAdminEmail(mailLower))))
+  ) {
+    return true;
+  }
+
+  // Verificação estrita de posse do tenant (atelie_id)
+  if (targetAtelieId) {
+    const cleanTarget = String(targetAtelieId).trim();
+    const userAtelie = req.user.atelieId || req.user.userId;
+
+    if (userAtelie && userAtelie === cleanTarget) {
+      return true;
+    }
+    if (req.user.userId && req.user.userId === cleanTarget) {
+      return true;
+    }
+
+    // Validação de segurança no Neon DB: o e-mail autenticado é o dono deste ateliê?
+    if (mailLower) {
+      try {
+        const db = getDb();
+        const rows = await db
+          .select({ email: atelies.email })
+          .from(atelies)
+          .where(eq(atelies.id, cleanTarget))
+          .limit(1);
+
+        if (rows.length > 0 && rows[0].email && rows[0].email.toLowerCase().trim() === mailLower) {
+          return true;
+        }
+      } catch (dbErr) {
+        console.warn('[Tenant Check DB Warning]:', dbErr);
+      }
+    }
+
+    // Tentativa de acesso cruzado a outro tenant bloqueada
+    res.status(403).json({
+      error: 'Acesso negado: não possui permissão para aceder ou alterar os dados deste ateliê.',
+      code: 'FORBIDDEN_TENANT_ACCESS',
+    });
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Validador restrito a Administradores Centrais Autorizados
+ */
+async function authorizeAdminRequest(req: Request, res: Response): Promise<boolean> {
+  const token = extractToken(req);
+  if (!token) {
+    res.status(401).json({
+      error: 'Autenticação necessária. Inicie sessão como Administrador.',
+      code: 'UNAUTHORIZED',
+    });
+    return false;
+  }
+
+  const verified = verifyJwtToken(token);
+  if (!verified.valid || !verified.payload) {
+    res.status(401).json({
+      error: 'Sessão inválida ou expirada. Inicie sessão novamente.',
+      code: 'INVALID_TOKEN',
+    });
+    return false;
+  }
+
+  req.user = verified.payload;
+  const mailLower = (req.user.email || '').toLowerCase().trim();
+  const isAdmin =
+    req.user.role === 'admin' ||
+    (mailLower && (INITIAL_AUTHORIZED_ADMINS.includes(mailLower) || (await isAuthorizedAdminEmail(mailLower))));
+
+  if (!isAdmin) {
+    res.status(403).json({
+      error: 'Acesso negado: este recurso exige privilégios de Administrador Central.',
+      code: 'FORBIDDEN_ADMIN_ONLY',
+    });
+    return false;
+  }
+
+  return true;
+}
+
+/**
  * 0. Setup/Sync Tables DDL (Acessível via GET ou POST sob /api/neon/setup-tables ou /neon/setup-tables)
  */
-const handleSetupTables = async (_req: Request, res: Response) => {
+const handleSetupTables = async (req: Request, res: Response) => {
+  if (!(await authorizeAdminRequest(req, res))) return;
   const result = await ensureTablesExist();
   if (result.success) {
     res.status(200).json({ 
@@ -103,9 +225,10 @@ router.post('/setup-tables', handleSetupTables);
 // ==============================================================================
 
 /**
- * Listar todos os ateliês (para o Painel Admin)
+ * Listar todos os ateliês (Exclusivo para o Painel Admin)
  */
 router.get('/neon/atelies', checkDbAvailable, async (req: Request, res: Response) => {
+  if (!(await authorizeAdminRequest(req, res))) return;
   try {
     const db = getDb();
     const result = await db.select().from(atelies).orderBy(desc(atelies.criado_em));
@@ -135,6 +258,7 @@ router.get('/neon/atelies', checkDbAvailable, async (req: Request, res: Response
 router.get('/neon/atelies/:id', checkDbAvailable, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    if (!(await authorizeTenantRequest(req, res, id))) return;
     const db = getDb();
     const result = await db.select().from(atelies).where(eq(atelies.id, id)).limit(1);
 
@@ -168,6 +292,8 @@ router.post('/neon/atelies', checkDbAvailable, async (req: Request, res: Respons
   try {
     const body = req.body;
     const id = body.id;
+    if (!(await authorizeTenantRequest(req, res, id))) return;
+
     const nome = body.nome;
     const email = body.emailOwner || body.email;
     const telefone = body.telefone;
@@ -212,9 +338,10 @@ router.post('/neon/atelies', checkDbAvailable, async (req: Request, res: Respons
 });
 
 /**
- * Excluir Ateliê
+ * Excluir Ateliê (Exclusivo Administrador)
  */
 router.delete('/neon/atelies/:id', checkDbAvailable, async (req: Request, res: Response) => {
+  if (!(await authorizeAdminRequest(req, res))) return;
   try {
     const { id } = req.params;
     const db = getDb();
@@ -239,6 +366,7 @@ router.get('/neon/clientes', checkDbAvailable, async (req: Request, res: Respons
     if (!atelieId) {
       return res.status(400).json({ error: 'Parâmetro atelie_id é obrigatório para isolamento multitenant.' });
     }
+    if (!(await authorizeTenantRequest(req, res, atelieId))) return;
 
     const db = getDb();
     const result = await db
@@ -272,15 +400,20 @@ router.post('/neon/clientes', checkDbAvailable, async (req: Request, res: Respon
   try {
     const body = req.body;
     const id = body.id;
-    const atelie_id = body.atelieId || body.atelie_id;
+    const atelie_id = body.atelieId || body.atelie_id || (req.headers['x-atelie-id'] as string);
+    if (!atelie_id) {
+      return res.status(400).json({ error: 'Parâmetro atelie_id é obrigatório para isolamento multitenant.' });
+    }
+    if (!(await authorizeTenantRequest(req, res, atelie_id))) return;
+
     const nome = body.nome;
     const telefone = body.telefone;
     const email = body.email;
     const observacoes = body.observacoes;
     const medidasData = body.medidas;
 
-    if (!id || !atelie_id || !nome) {
-      return res.status(400).json({ error: 'Campos id, atelie_id e nome são obrigatórios.' });
+    if (!id || !nome) {
+      return res.status(400).json({ error: 'Campos id e nome são obrigatórios.' });
     }
 
     const db = getDb();
@@ -332,13 +465,13 @@ router.delete('/neon/clientes/:id', checkDbAvailable, async (req: Request, res: 
   try {
     const { id } = req.params;
     const atelieId = (req.query.atelie_id as string) || (req.headers['x-atelie-id'] as string);
-    const db = getDb();
-
-    if (atelieId) {
-      await db.delete(clientes).where(and(eq(clientes.id, id), eq(clientes.atelie_id, atelieId)));
-    } else {
-      await db.delete(clientes).where(eq(clientes.id, id));
+    if (!atelieId) {
+      return res.status(400).json({ error: 'Parâmetro atelie_id é obrigatório para validação multitenant.' });
     }
+    if (!(await authorizeTenantRequest(req, res, atelieId))) return;
+
+    const db = getDb();
+    await db.delete(clientes).where(and(eq(clientes.id, id), eq(clientes.atelie_id, atelieId)));
 
     res.json({ success: true, message: 'Cliente removido com sucesso no Neon.' });
   } catch (err: any) {
@@ -360,6 +493,7 @@ router.get('/neon/encomendas', checkDbAvailable, async (req: Request, res: Respo
     if (!atelieId) {
       return res.status(400).json({ error: 'Parâmetro atelie_id é obrigatório para isolamento multitenant.' });
     }
+    if (!(await authorizeTenantRequest(req, res, atelieId))) return;
 
     const db = getDb();
     const result = await db
@@ -401,7 +535,12 @@ router.post('/neon/encomendas', checkDbAvailable, async (req: Request, res: Resp
   try {
     const body = req.body;
     const id = body.id;
-    const atelie_id = body.atelieId || body.atelie_id;
+    const atelie_id = body.atelieId || body.atelie_id || (req.headers['x-atelie-id'] as string);
+    if (!atelie_id) {
+      return res.status(400).json({ error: 'Parâmetro atelie_id é obrigatório para isolamento multitenant.' });
+    }
+    if (!(await authorizeTenantRequest(req, res, atelie_id))) return;
+
     const cliente_id = body.clienteId || body.cliente_id || null;
     const cliente_nome = body.clienteNome || body.cliente_nome || null;
     const cliente_telefone = body.clienteTelefone || body.cliente_telefone || null;
@@ -415,8 +554,8 @@ router.post('/neon/encomendas', checkDbAvailable, async (req: Request, res: Resp
     const foto_referencia = body.fotoReferenciaUrl || body.fotoReferencia || body.foto_referencia || null;
     const observacoes = body.observacoes || null;
 
-    if (!id || !atelie_id || !descricao) {
-      return res.status(400).json({ error: 'Campos id, atelie_id e descricao são obrigatórios.' });
+    if (!id || !descricao) {
+      return res.status(400).json({ error: 'Campos id e descricao são obrigatórios.' });
     }
 
     const db = getDb();
@@ -491,13 +630,13 @@ router.delete('/neon/encomendas/:id', checkDbAvailable, async (req: Request, res
   try {
     const { id } = req.params;
     const atelieId = (req.query.atelie_id as string) || (req.headers['x-atelie-id'] as string);
-    const db = getDb();
-
-    if (atelieId) {
-      await db.delete(encomendas).where(and(eq(encomendas.id, id), eq(encomendas.atelie_id, atelieId)));
-    } else {
-      await db.delete(encomendas).where(eq(encomendas.id, id));
+    if (!atelieId) {
+      return res.status(400).json({ error: 'Parâmetro atelie_id é obrigatório para validação multitenant.' });
     }
+    if (!(await authorizeTenantRequest(req, res, atelieId))) return;
+
+    const db = getDb();
+    await db.delete(encomendas).where(and(eq(encomendas.id, id), eq(encomendas.atelie_id, atelieId)));
 
     res.json({ success: true, message: 'Encomenda removida com sucesso no Neon.' });
   } catch (err: any) {
@@ -520,6 +659,10 @@ router.get('/neon/medidas', checkDbAvailable, async (req: Request, res: Response
 
     if (!atelieId) {
       return res.status(400).json({ error: 'Parâmetro atelie_id é obrigatório.' });
+    }
+
+    if (!(await authorizeTenantRequest(req, res, atelieId))) {
+      return;
     }
 
     const db = getDb();
@@ -559,11 +702,15 @@ router.post('/neon/medidas', checkDbAvailable, async (req: Request, res: Respons
   try {
     const body = req.body;
     const id = body.id;
-    const atelie_id = body.atelieId || body.atelie_id;
+    const atelie_id = body.atelieId || body.atelie_id || (req.headers['x-atelie-id'] as string);
     const cliente_id = body.clienteId || body.cliente_id;
 
     if (!id || !atelie_id || !cliente_id) {
       return res.status(400).json({ error: 'Campos id, atelie_id e cliente_id são obrigatórios.' });
+    }
+
+    if (!(await authorizeTenantRequest(req, res, atelie_id))) {
+      return;
     }
 
     const db = getDb();
@@ -628,6 +775,31 @@ router.post('/neon/medidas', checkDbAvailable, async (req: Request, res: Respons
   }
 });
 
+/**
+ * Remover Medidas
+ */
+router.delete('/neon/medidas/:id', checkDbAvailable, async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id;
+    const atelieId = (req.query.atelie_id as string) || (req.headers['x-atelie-id'] as string);
+
+    if (!atelieId) {
+      return res.status(400).json({ error: 'Parâmetro atelie_id é obrigatório para remover medida.' });
+    }
+
+    if (!(await authorizeTenantRequest(req, res, atelieId))) {
+      return;
+    }
+
+    const db = getDb();
+    await db.delete(medidas).where(and(eq(medidas.id, id), eq(medidas.atelie_id, atelieId)));
+    res.json({ success: true, message: 'Medidas removidas com sucesso.' });
+  } catch (err: any) {
+    console.error('[Neon] Erro ao remover medidas:', err);
+    res.status(500).json({ error: "Erro interno ao processar operação no banco de dados." });
+  }
+});
+
 // ==============================================================================
 // 5. SOLICITAÇÕES DE PAGAMENTO (Admin & Ateliê)
 // ==============================================================================
@@ -637,8 +809,24 @@ router.post('/neon/medidas', checkDbAvailable, async (req: Request, res: Respons
  */
 router.get('/neon/solicitacoes', checkDbAvailable, async (req: Request, res: Response) => {
   try {
+    const atelieId = (req.query.atelie_id as string) || (req.headers['x-atelie-id'] as string);
+
+    // Se um atelieId específico for passado, autoriza se for o próprio ateliê ou admin
+    if (atelieId) {
+      if (!(await authorizeTenantRequest(req, res, atelieId))) {
+        return;
+      }
+    } else {
+      // Listar todas as solicitações é restrito a administradores
+      if (!(await authorizeAdminRequest(req, res))) {
+        return;
+      }
+    }
+
     const db = getDb();
-    const result = await db.select().from(solicitacoesPagamento).orderBy(desc(solicitacoesPagamento.solicitado_em));
+    const result = atelieId
+      ? await db.select().from(solicitacoesPagamento).where(eq(solicitacoesPagamento.atelie_id, atelieId)).orderBy(desc(solicitacoesPagamento.solicitado_em))
+      : await db.select().from(solicitacoesPagamento).orderBy(desc(solicitacoesPagamento.solicitado_em));
     
     const mapped = result.map(s => ({
       id: s.id,
@@ -669,7 +857,7 @@ router.post('/neon/solicitacoes', checkDbAvailable, async (req: Request, res: Re
   try {
     const body = req.body;
     const id = body.id;
-    const atelie_id = body.atelieId || body.atelie_id;
+    const atelie_id = body.atelieId || body.atelie_id || (req.headers['x-atelie-id'] as string);
     const atelie_nome = body.atelieNome || body.atelie_nome || 'Ateliê';
     const email_owner = body.emailOwner || body.email_owner;
     const telefone_owner = body.telefoneOwner || body.telefone_owner || null;
@@ -683,6 +871,10 @@ router.post('/neon/solicitacoes', checkDbAvailable, async (req: Request, res: Re
 
     if (!id || !atelie_id || !email_owner) {
       return res.status(400).json({ error: 'Campos id, atelieId e emailOwner são obrigatórios.' });
+    }
+
+    if (!(await authorizeTenantRequest(req, res, atelie_id))) {
+      return;
     }
 
     const db = getDb();
@@ -770,6 +962,10 @@ router.get('/neon/configuracoes', checkDbAvailable, async (req: Request, res: Re
  */
 router.post('/neon/configuracoes', checkDbAvailable, async (req: Request, res: Response) => {
   try {
+    if (!(await authorizeAdminRequest(req, res))) {
+      return;
+    }
+
     const body = req.body;
     const db = getDb();
 
@@ -812,6 +1008,10 @@ router.post('/neon/configuracoes', checkDbAvailable, async (req: Request, res: R
  * Listar administradores
  */
 router.get('/neon/admins', checkDbAvailable, async (req: Request, res: Response) => {
+  if (!(await authorizeAdminRequest(req, res))) {
+    return;
+  }
+
   const initialAdmins = Array.from(INITIAL_AUTHORIZED_ADMINS);
   try {
     await ensureAdminColumnsExist();
@@ -1029,6 +1229,10 @@ router.post('/neon/admins/verify-password', checkDbAvailable, async (req: Reques
  */
 router.post('/neon/admins', checkDbAvailable, async (req: Request, res: Response) => {
   try {
+    if (!(await authorizeAdminRequest(req, res))) {
+      return;
+    }
+
     const email = (req.body.email || '').toLowerCase().trim();
     const initialPassword = req.body.initialPassword;
 
@@ -1063,6 +1267,10 @@ router.post('/neon/admins', checkDbAvailable, async (req: Request, res: Response
  */
 router.delete('/neon/admins/:email', checkDbAvailable, async (req: Request, res: Response) => {
   try {
+    if (!(await authorizeAdminRequest(req, res))) {
+      return;
+    }
+
     const email = decodeURIComponent(req.params.email).toLowerCase().trim();
     const db = getDb();
     await db.delete(admins).where(eq(admins.email, email));
@@ -1107,6 +1315,10 @@ router.post(['/neon/sync-atelie', '/sync-atelie'], checkDbAvailable, async (req:
         message: 'Falha ao sincronizar dados do ateliê', 
         details: 'ID do ateliê não pode ser vazio.' 
       });
+    }
+
+    if (!(await authorizeTenantRequest(req, res, atelieId))) {
+      return;
     }
 
     const atelieNome = (atelie.nome && String(atelie.nome).trim()) || 'Ateliê';

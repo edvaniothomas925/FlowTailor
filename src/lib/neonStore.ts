@@ -4,10 +4,13 @@ import { idbSave, idbSaveBulk, idbGetAll, idbDelete, idbClearAll } from './index
 // ==============================================================================
 // NEON AUTHENTICATION CONFIGURATION (Project: flowtailor-db)
 // ==============================================================================
+const DEFAULT_NEON_AUTH_URL = 'https://ep-wispy-moon-zab2krf0.neonauth.c-2.eu-west-2.aws.neon.tech/neondb/auth';
+const effectiveAuthUrl = import.meta.env.VITE_NEON_AUTH_URL || DEFAULT_NEON_AUTH_URL;
+
 export const NEON_AUTH_CONFIG = {
   applicationName: 'flowtailor-db',
-  authUrl: import.meta.env.VITE_NEON_AUTH_URL || 'https://ep-wispy-moon-zab2krf0.neonauth.c-2.eu-west-2.aws.neon.tech/neondb/auth',
-  jwksUrl: import.meta.env.VITE_NEON_JWKS_URL || 'https://ep-wispy-moon-zab2krf0.neonauth.c-2.eu-west-2.aws.neon.tech/neondb/auth/.well-known/jwks.json',
+  authUrl: effectiveAuthUrl,
+  jwksUrl: import.meta.env.VITE_NEON_JWKS_URL || `${effectiveAuthUrl.replace(/\/+$/, '')}/.well-known/jwks.json`,
 };
 
 // Utility to clean objects for API payloads
@@ -603,12 +606,13 @@ class NeonDatabaseManager {
   async fetchAtelieDataFromNeon(atelieId: string) {
     if (this.isOfflineMode()) return;
     try {
+      const headers = this.getAuthHeaders(atelieId);
       const [resAtelie, resClientes, resPedidos, resMedidas, resConfigs] = await Promise.allSettled([
-        fetch(`/api/neon/atelies/${atelieId}`).then(r => r.ok ? r.json() : null),
-        fetch(`/api/neon/clientes?atelie_id=${encodeURIComponent(atelieId)}`).then(r => r.ok ? r.json() : null),
-        fetch(`/api/neon/encomendas?atelie_id=${encodeURIComponent(atelieId)}`).then(r => r.ok ? r.json() : null),
-        fetch(`/api/neon/medidas?atelie_id=${encodeURIComponent(atelieId)}`).then(r => r.ok ? r.json() : null),
-        fetch('/api/neon/configuracoes').then(r => r.ok ? r.json() : null),
+        fetch(`/api/neon/atelies/${atelieId}`, { headers }).then(r => r.ok ? r.json() : null),
+        fetch(`/api/neon/clientes?atelie_id=${encodeURIComponent(atelieId)}`, { headers }).then(r => r.ok ? r.json() : null),
+        fetch(`/api/neon/encomendas?atelie_id=${encodeURIComponent(atelieId)}`, { headers }).then(r => r.ok ? r.json() : null),
+        fetch(`/api/neon/medidas?atelie_id=${encodeURIComponent(atelieId)}`, { headers }).then(r => r.ok ? r.json() : null),
+        fetch('/api/neon/configuracoes', { headers }).then(r => r.ok ? r.json() : null),
       ]);
 
       if (resAtelie.status === 'fulfilled' && resAtelie.value?.atelie) {
@@ -679,11 +683,12 @@ class NeonDatabaseManager {
   async fetchAdminDataFromNeon() {
     if (this.isOfflineMode()) return;
     try {
+      const headers = this.getAuthHeaders();
       const [resAtelies, resSolicitacoes, resConfigs, resAdmins] = await Promise.allSettled([
-        fetch('/api/neon/atelies').then(r => r.ok ? r.json() : null),
-        fetch('/api/neon/solicitacoes').then(r => r.ok ? r.json() : null),
-        fetch('/api/neon/configuracoes').then(r => r.ok ? r.json() : null),
-        fetch('/api/neon/admins').then(r => r.ok ? r.json() : null),
+        fetch('/api/neon/atelies', { headers }).then(r => r.ok ? r.json() : null),
+        fetch('/api/neon/solicitacoes', { headers }).then(r => r.ok ? r.json() : null),
+        fetch('/api/neon/configuracoes', { headers }).then(r => r.ok ? r.json() : null),
+        fetch('/api/neon/admins', { headers }).then(r => r.ok ? r.json() : null),
       ]);
 
       if (resAtelies.status === 'fulfilled' && resAtelies.value?.atelies) {
@@ -864,7 +869,7 @@ class NeonDatabaseManager {
       try {
         await fetch('/api/neon/admins', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: this.getAuthHeaders(),
           body: JSON.stringify({ email: mailLower, initialPassword }),
         });
       } catch (err) {
@@ -885,6 +890,7 @@ class NeonDatabaseManager {
     try {
       await fetch(`/api/neon/admins/${encodeURIComponent(mailLower)}`, {
         method: 'DELETE',
+        headers: this.getAuthHeaders(),
       });
     } catch (err) {
       handleSyncError(err, OperationType.DELETE, 'admins');
@@ -1122,6 +1128,7 @@ class NeonDatabaseManager {
     try {
       await fetch(`/api/neon/encomendas/${pedidoId}?atelie_id=${encodeURIComponent(atelieId)}`, {
         method: 'DELETE',
+        headers: this.getAuthHeaders(atelieId),
       });
     } catch (err) {
       handleSyncError(err, OperationType.DELETE, `encomendas/${pedidoId}`);
@@ -1154,7 +1161,7 @@ class NeonDatabaseManager {
     try {
       await fetch('/api/neon/solicitacoes', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.getAuthHeaders(solicitacao.atelieId),
         body: JSON.stringify(solicitacao),
       });
     } catch (err) {
@@ -2005,6 +2012,19 @@ export class CustomAuthService {
     if (mode === 'demo_admin') {
       const uid = 'admin_flowtailor';
       const email = 'admin@flowtailor.ao';
+      try {
+        const authRes = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password: 'admin123' }),
+        });
+        const authData = await authRes.json().catch(() => null);
+        if (authData?.accessToken && typeof localStorage !== 'undefined') {
+          localStorage.setItem('jwt_token', authData.accessToken);
+        }
+      } catch (authErr) {
+        console.warn('[Demo Auth Warning]:', authErr);
+      }
       localStorage.setItem('ateliepro_current_uid', uid);
       localStorage.setItem('ateliepro_current_email', email);
       localStorage.setItem('ateliepro_admin_nome', 'Edvânio (Administrador)');
@@ -2023,6 +2043,19 @@ export class CustomAuthService {
     } else {
       const uid = 'user_rosa';
       const email = 'rosa@ateliepro.com';
+      try {
+        const authRes = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password: '123456' }),
+        });
+        const authData = await authRes.json().catch(() => null);
+        if (authData?.accessToken && typeof localStorage !== 'undefined') {
+          localStorage.setItem('jwt_token', authData.accessToken);
+        }
+      } catch (authErr) {
+        console.warn('[Demo Auth Warning]:', authErr);
+      }
       let atelie = localDb.getAtelie(uid) || localDb.getAtelies().find(a => a.id === 'user_rosa' || a.emailOwner === email);
       if (!atelie) {
         atelie = {
@@ -2099,6 +2132,8 @@ export class CustomAuthService {
       localStorage.removeItem('jwt_token');
       localStorage.removeItem('refresh_token');
       localStorage.removeItem('flowtailor_session');
+      localStorage.removeItem('flowtailor_current_user');
+      localStorage.removeItem('flowtailor_jwt_token');
     }
     if (typeof sessionStorage !== 'undefined') {
       sessionStorage.clear();

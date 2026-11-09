@@ -525,25 +525,46 @@ router.get('/neon/config', (_req: Request, res: Response) => {
  * 5. Default production domain: https://flow-tailor.vercel.app/api/auth/google/callback
  */
 export function getGoogleOAuthRedirectUri(req?: Request): string {
+  // 1. Explicit redirect URI passed in query or body (e.g. from frontend window.location.origin)
+  const explicitUri = (req?.query?.redirect_uri as string) || (req?.body?.redirect_uri as string);
+  if (explicitUri && (explicitUri.startsWith('http://') || explicitUri.startsWith('https://'))) {
+    return explicitUri;
+  }
+
+  // 2. Explicit environment variable override
   if (process.env.GOOGLE_OAUTH_REDIRECT_URI) {
     return process.env.GOOGLE_OAUTH_REDIRECT_URI;
   }
-  if (process.env.VERCEL_URL) {
-    const domain = process.env.VERCEL_URL.startsWith('http')
-      ? process.env.VERCEL_URL
-      : `https://${process.env.VERCEL_URL}`;
-    return `${domain.replace(/\/+$/, '')}/api/auth/google/callback`;
-  }
-  if (process.env.APP_URL) {
-    return `${process.env.APP_URL.replace(/\/+$/, '')}/api/auth/google/callback`;
-  }
+
+  // 3. Dynamic domain from current request origin / headers
   if (req) {
+    const originHeader = req.get('origin') || req.get('referer');
+    if (originHeader) {
+      try {
+        const parsed = new URL(originHeader);
+        return `${parsed.origin}/api/auth/google/callback`;
+      } catch {}
+    }
     const host = req.get('x-forwarded-host') || req.get('host');
     if (host) {
       const proto = req.get('x-forwarded-proto') || (req.secure ? 'https' : (host.includes('localhost') || host.includes('127.0.0.1') ? 'http' : 'https'));
       return `${proto}://${host}/api/auth/google/callback`;
     }
   }
+
+  // 4. Vercel dynamic URL
+  if (process.env.VERCEL_URL) {
+    const domain = process.env.VERCEL_URL.startsWith('http')
+      ? process.env.VERCEL_URL
+      : `https://${process.env.VERCEL_URL}`;
+    return `${domain.replace(/\/+$/, '')}/api/auth/google/callback`;
+  }
+
+  // 5. App URL
+  if (process.env.APP_URL) {
+    return `${process.env.APP_URL.replace(/\/+$/, '')}/api/auth/google/callback`;
+  }
+
   return 'https://flow-tailor.vercel.app/api/auth/google/callback';
 }
 

@@ -984,13 +984,24 @@ function AuthScreen({ onLoginSuccess, initialTab = 'login', onBackToLanding, ini
   const openGoogleAuth = async () => {
     setErrorMess('');
     try {
-      // Verifica se o Google OAuth direto está habilitado no servidor
-      const res = await fetch('/api/auth/google?format=json', {
+      const currentOrigin = window.location.origin;
+      const callbackUrl = `${currentOrigin}/api/auth/google/callback`;
+      const res = await fetch(`/api/auth/google?format=json&redirect_uri=${encodeURIComponent(callbackUrl)}`, {
         headers: { Accept: 'application/json' },
       });
       if (res.ok) {
         const data = await res.json();
         if (data.success && data.url) {
+          // If running inside an iframe (like AI Studio preview), redirect the top window if possible
+          if (window.top && window.top !== window) {
+            try {
+              window.top.location.href = data.url;
+              return;
+            } catch (topErr) {
+              // Cross-origin iframe restriction fallback: open in window.location or popup
+              console.warn('[Google OAuth] Top window redirect prevented by sandbox, opening directly:', topErr);
+            }
+          }
           window.location.href = data.url;
           return;
         }

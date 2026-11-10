@@ -293,25 +293,30 @@ export default function App() {
 
   useEffect(() => {
     try {
-      const params = new URLSearchParams(window.location.search);
-      const queryCountry = params.get('country') || params.get('pais');
+      const searchParams = new URLSearchParams(window.location.search);
+      const hashRaw = window.location.hash.startsWith('#') ? window.location.hash.slice(1) : window.location.hash;
+      const hashParams = new URLSearchParams(hashRaw);
+      const getParam = (k: string) => searchParams.get(k) || hashParams.get(k);
+
+      const queryCountry = getParam('country') || getParam('pais');
       if (queryCountry === 'BR' || queryCountry === 'PT' || queryCountry === 'AO') {
         setAuthInitialCountry(queryCountry);
       }
 
-      const authError = params.get('auth_error') || params.get('error');
+      const authError = getParam('auth_error') || getParam('error');
       if (authError) {
         toast.error('Erro na autenticação do Google: ' + decodeURIComponent(authError));
         window.history.replaceState({}, '', window.location.pathname);
       }
 
-      const loginParam = params.get('login');
-      const token = params.get('token');
-      const uid = params.get('uid');
-      const email = params.get('email');
-      const role = params.get('role');
-      const atelieName = params.get('name');
-      const displayNameParam = params.get('displayName');
+      const loginParam = getParam('login');
+      const token = getParam('token');
+      const uid = getParam('uid');
+      const email = getParam('email');
+      const role = getParam('role');
+      const isAdminParam = getParam('isAdmin');
+      const atelieName = getParam('name');
+      const displayNameParam = getParam('displayName');
 
       if (loginParam === 'success' || token) {
         if (token) {
@@ -320,7 +325,12 @@ export default function App() {
         }
         if (email && uid) {
           const mailLower = email.toLowerCase().trim();
-          const isAdmin = localDb.getAdmins().map(a => a.toLowerCase().trim()).includes(mailLower);
+          const isAdmin = role === 'admin'
+            || isAdminParam === 'true'
+            || mailLower === 'edvaniothomas925@gmail.com'
+            || mailLower === 'admin@flowtailor.ao'
+            || localDb.getAdmins().map(a => a.toLowerCase().trim()).includes(mailLower);
+
           localStorage.setItem('ateliepro_current_uid', uid);
           localStorage.setItem('ateliepro_current_email', mailLower);
 
@@ -342,8 +352,8 @@ export default function App() {
           localStorage.setItem('flowtailor_session', JSON.stringify(userData));
         }
         toast.success('Sessão iniciada com sucesso via Google!');
-        window.history.replaceState({}, '', window.location.pathname);
         refreshSession();
+        window.history.replaceState({}, '', window.location.pathname);
       }
     } catch (e) {
       console.warn("Could not read URL parameters on mount", e);

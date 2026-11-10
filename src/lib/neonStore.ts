@@ -1392,13 +1392,19 @@ export class CustomAuthService {
   private restoreSession() {
     if (typeof window !== 'undefined' && window.location) {
       try {
-        const params = new URLSearchParams(window.location.search);
-        const token = params.get('token');
-        const loginParam = params.get('login');
-        const uidParam = params.get('uid');
-        const emailParam = params.get('email');
-        const roleParam = params.get('role');
-        const nameParam = params.get('name');
+        const searchParams = new URLSearchParams(window.location.search);
+        const hashRaw = window.location.hash.startsWith('#') ? window.location.hash.slice(1) : window.location.hash;
+        const hashParams = new URLSearchParams(hashRaw);
+        const getParam = (k: string) => searchParams.get(k) || hashParams.get(k);
+
+        const token = getParam('token');
+        const loginParam = getParam('login');
+        const uidParam = getParam('uid');
+        const emailParam = getParam('email');
+        const roleParam = getParam('role');
+        const nameParam = getParam('name');
+        const displayNameParam = getParam('displayName');
+        const isAdminParam = getParam('isAdmin');
 
         if (token || loginParam === 'success') {
           if (token) {
@@ -1407,11 +1413,15 @@ export class CustomAuthService {
           }
           if (emailParam && uidParam) {
             const mailLower = emailParam.toLowerCase().trim();
-            const isAdmin = localDb.getAdmins().map(a => a.toLowerCase().trim()).includes(mailLower);
+            const isAdmin = roleParam === 'admin'
+              || isAdminParam === 'true'
+              || INITIAL_ADMINS.includes(mailLower)
+              || localDb.getAdmins().map(a => a.toLowerCase().trim()).includes(mailLower);
+
             localStorage.setItem('ateliepro_current_uid', uidParam);
             localStorage.setItem('ateliepro_current_email', mailLower);
             
-            const rawName = nameParam?.trim() || mailLower.split('@')[0];
+            const rawName = displayNameParam?.trim() || nameParam?.trim() || mailLower.split('@')[0];
             const cleanName = rawName.startsWith('Ateliê de ') ? rawName.replace('Ateliê de ', '') : rawName;
             const atelieName = nameParam ? (nameParam.startsWith('Ateliê') ? nameParam : `Ateliê de ${nameParam}`) : (isAdmin ? 'Administração Central' : `Ateliê de ${cleanName}`);
             
@@ -1455,12 +1465,29 @@ export class CustomAuthService {
     }
 
     if (typeof localStorage === 'undefined') return;
+
+    // Cookie fallback in case localStorage was not hydrated but server set flowtailor_session cookie
+    if (!localStorage.getItem('ateliepro_current_uid') && typeof document !== 'undefined') {
+      try {
+        const match = document.cookie.match(/flowtailor_session=([^;]+)/);
+        if (match) {
+          const cookieUser = JSON.parse(decodeURIComponent(match[1]));
+          if (cookieUser?.uid && cookieUser?.email) {
+            localStorage.setItem('ateliepro_current_uid', cookieUser.uid);
+            localStorage.setItem('ateliepro_current_email', cookieUser.email);
+            localStorage.setItem('flowtailor_current_user', JSON.stringify(cookieUser));
+            localStorage.setItem('flowtailor_session', JSON.stringify(cookieUser));
+          }
+        }
+      } catch {}
+    }
+
     const uid = localStorage.getItem('ateliepro_current_uid');
     const email = localStorage.getItem('ateliepro_current_email');
     if (uid && email) {
       const mailLower = email.toLowerCase().trim();
       const adminList = localDb.getAdmins().map(a => a.toLowerCase().trim());
-      const isEmailAdmin = adminList.includes(mailLower);
+      const isEmailAdmin = INITIAL_ADMINS.includes(mailLower) || adminList.includes(mailLower);
       
       let storedUserObj: any = null;
       try {
@@ -1468,14 +1495,15 @@ export class CustomAuthService {
         if (rawUser) storedUserObj = JSON.parse(rawUser);
       } catch (e) {}
 
+      const isRecordedAdmin = Boolean(isEmailAdmin || storedUserObj?.isAdmin || storedUserObj?.role === 'admin');
       const userName = storedUserObj?.name || storedUserObj?.displayName || mailLower.split('@')[0];
 
-      let atelie = !isEmailAdmin ? localDb.getAtelie(uid) : null;
-      if (!isEmailAdmin && !atelie) {
+      let atelie = !isRecordedAdmin ? localDb.getAtelie(uid) : null;
+      if (!isRecordedAdmin && !atelie) {
         atelie = localDb.getAtelies().find(a => a.emailOwner.toLowerCase() === mailLower) || null;
       }
 
-      if (!isEmailAdmin && !atelie) {
+      if (!isRecordedAdmin && !atelie) {
         const atelieTitle = storedUserObj?.atelieName || `Ateliê de ${userName}`;
         atelie = {
           id: uid,
@@ -1496,13 +1524,13 @@ export class CustomAuthService {
       this.currentSession = { 
         uid, 
         email: mailLower, 
-        name: isEmailAdmin ? adminName : (atelie?.nome || userName),
-        displayName: isEmailAdmin ? adminName : userName,
-        role: isEmailAdmin ? 'admin' : 'atelie_owner',
-        isAdmin: isEmailAdmin, 
-        atelie: isEmailAdmin ? null : atelie 
+        name: isRecordedAdmin ? adminName : (atelie?.nome || userName),
+        displayName: isRecordedAdmin ? adminName : userName,
+        role: isRecordedAdmin ? 'admin' : 'atelie_owner',
+        isAdmin: isRecordedAdmin, 
+        atelie: isRecordedAdmin ? null : atelie 
       };
-      if (isEmailAdmin) {
+      if (isRecordedAdmin) {
         localDb.initAdminRealtimeSync();
       } else if (atelie) {
         localDb.initRealtimeSync(atelie.id || uid);

@@ -533,26 +533,49 @@ export function getGoogleOAuthRedirectUri(req?: Request): string {
 
   // 2. Explicit environment variable override
   if (process.env.GOOGLE_OAUTH_REDIRECT_URI) {
-    return process.env.GOOGLE_OAUTH_REDIRECT_URI;
+    return process.env.GOOGLE_OAUTH_REDIRECT_URI.trim();
   }
 
-  // 3. Dynamic domain from current request origin / headers
+  // 3. Dynamic domain from current request headers
   if (req) {
-    const originHeader = req.get('origin') || req.get('referer');
-    if (originHeader) {
-      try {
-        const parsed = new URL(originHeader);
-        return `${parsed.origin}/api/auth/google/callback`;
-      } catch {}
-    }
+    // Check Forwarded Host / Host header first (standard in Vercel & proxies)
     const host = req.get('x-forwarded-host') || req.get('host');
-    if (host) {
+    if (host && !host.includes('google.com') && !host.includes('googleusercontent.com')) {
       const proto = req.get('x-forwarded-proto') || (req.secure ? 'https' : (host.includes('localhost') || host.includes('127.0.0.1') ? 'http' : 'https'));
       return `${proto}://${host}/api/auth/google/callback`;
     }
+
+    // Check Origin header (strictly excluding Google domains)
+    const originHeader = req.get('origin');
+    if (originHeader) {
+      try {
+        const parsed = new URL(originHeader);
+        if (!parsed.hostname.includes('google.com') && !parsed.hostname.includes('googleusercontent.com')) {
+          return `${parsed.origin}/api/auth/google/callback`;
+        }
+      } catch {}
+    }
+
+    // Check Referer header (strictly excluding Google domains to prevent accounts.google.com as callback redirect_uri)
+    const refererHeader = req.get('referer');
+    if (refererHeader) {
+      try {
+        const parsed = new URL(refererHeader);
+        if (!parsed.hostname.includes('google.com') && !parsed.hostname.includes('googleusercontent.com')) {
+          return `${parsed.origin}/api/auth/google/callback`;
+        }
+      } catch {}
+    }
   }
 
-  // 4. Vercel dynamic URL
+  // 4. Vercel dynamic project URL
+  if (process.env.VERCEL_PROJECT_PRODUCTION_URL) {
+    const domain = process.env.VERCEL_PROJECT_PRODUCTION_URL.startsWith('http')
+      ? process.env.VERCEL_PROJECT_PRODUCTION_URL
+      : `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`;
+    return `${domain.replace(/\/+$/, '')}/api/auth/google/callback`;
+  }
+
   if (process.env.VERCEL_URL) {
     const domain = process.env.VERCEL_URL.startsWith('http')
       ? process.env.VERCEL_URL
@@ -731,14 +754,26 @@ router.get(['/google', '/auth/google', '/api/auth/google'], (req: Request, res: 
   }
 
   const redirectUri = getGoogleOAuthRedirectUri(req);
-  const state = (req.query.state as string) || crypto.randomUUID();
+  const nonce = (req.query.state as string) || crypto.randomUUID();
+  // Encode nonce and redirectUri in state so callback receives the exact same redirect_uri
+  const statePayload = { nonce, redirectUri };
+  const state = Buffer.from(JSON.stringify(statePayload)).toString('base64url');
 
-  // Armazenar state em cookie seguro para validação CSRF
+  const isProduction = process.env.NODE_ENV === 'production';
+  // Armazenar state e redirect_uri em cookies seguros para validação CSRF e integridade do handshake
   res.cookie('flowtailor_oauth_state', state, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
+    secure: isProduction,
     sameSite: 'lax',
+    path: '/',
     maxAge: 10 * 60 * 1000, // 10 minutos
+  });
+  res.cookie('flowtailor_oauth_redirect_uri', redirectUri, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: 'lax',
+    path: '/',
+    maxAge: 10 * 60 * 1000,
   });
 
   const params = new URLSearchParams({
@@ -810,10 +845,10 @@ router.all([
     // Validação de proteção CSRF via State Cookie (se presente)
     const storedState = req.cookies?.flowtailor_oauth_state;
     if (storedState && state && storedState !== state) {
-      console.warn('[Google OAuth Callback] Aviso de segurança CSRF: state recebido não coincide com o cookie emitido.');
+      console.warn('[Google OAuth Callback] Aviso de segurança CSRF: state recebido difere do cookie emitido.');
     }
     try {
-      res.clearCookie('flowtailor_oauth_state');
+      res.clearCookie('flowtailor_oauth_state', { path: '/' });
     } catch {}
 
     const creds = getGoogleCredentials();
@@ -829,7 +864,30 @@ router.all([
       return res.redirect('/?auth_error=google_config_missing');
     }
 
-    const redirectUri = (req.body?.redirect_uri as string) || getGoogleOAuthRedirectUri(req);
+    // Determinar o redirect_uri exato utilizado no início do fluxo:
+    // 1. Decodificado a partir do parâmetro 'state' retornado pelo Google
+    // 2. Cookie 'flowtailor_oauth_redirect_uri'
+    // 3. getGoogleOAuthRedirectUri(req)
+    let redirectUri = (req.body?.redirect_uri as string) || '';
+
+    if (!redirectUri && state && typeof state === 'string') {
+      try {
+        const decodedState = JSON.parse(Buffer.from(state, 'base64url').toString('utf8'));
+        if (decodedState?.redirectUri && typeof decodedState.redirectUri === 'string') {
+          redirectUri = decodedState.redirectUri;
+        }
+      } catch {
+        // State em formato legado ou string simples
+      }
+    }
+
+    if (!redirectUri) {
+      redirectUri = req.cookies?.flowtailor_oauth_redirect_uri || getGoogleOAuthRedirectUri(req);
+    }
+
+    try {
+      res.clearCookie('flowtailor_oauth_redirect_uri', { path: '/' });
+    } catch {}
 
     // Exchange authorization code for Google access token & ID token
     const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
@@ -947,9 +1005,26 @@ router.all([
     };
 
     const tokens = generateTokenPair(userPayload);
-    const refreshOpts = getRefreshCookieOptions();
+    const isProd = process.env.NODE_ENV === 'production';
+    
+    // Set cookies with path: '/' and sameSite: 'lax' so they persist across routes and through cross-site redirect from Google
+    const refreshOpts: CookieOptions = {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: 'lax',
+      path: '/',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    };
+    const clientOpts: CookieOptions = {
+      httpOnly: false,
+      secure: isProd,
+      sameSite: 'lax',
+      path: '/',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    };
+
     res.cookie(REFRESH_COOKIE_NAME, tokens.refreshToken, refreshOpts);
-    res.cookie('flowtailor_jwt_token', tokens.accessToken, { ...refreshOpts, httpOnly: false });
+    res.cookie('flowtailor_jwt_token', tokens.accessToken, clientOpts);
     res.cookie('flowtailor_session', JSON.stringify({
       uid: userPayload.userId,
       email: userPayload.email,
@@ -959,7 +1034,7 @@ router.all([
       isAdmin,
       atelieName: userPayload.atelieName,
       authProvider: 'google',
-    }), { ...refreshOpts, httpOnly: false });
+    }), clientOpts);
 
     const forwarded = req.headers['x-forwarded-for'];
     const ip = (typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : req.socket.remoteAddress) || '127.0.0.1';
@@ -989,7 +1064,7 @@ router.all([
 
     // Redirect directly to /admin or /dashboard with login=success and authentication parameters
     const targetPath = isAdmin ? '/admin' : '/dashboard';
-    const redirectUrl = `${targetPath}?login=success&token=${encodeURIComponent(tokens.accessToken)}&uid=${encodeURIComponent(userPayload.userId)}&email=${encodeURIComponent(userPayload.email)}&role=${encodeURIComponent(role)}&name=${encodeURIComponent(userPayload.atelieName || '')}&displayName=${encodeURIComponent(userPayload.displayName || '')}`;
+    const redirectUrl = `${targetPath}?login=success&token=${encodeURIComponent(tokens.accessToken)}&uid=${encodeURIComponent(userPayload.userId)}&email=${encodeURIComponent(userPayload.email)}&role=${encodeURIComponent(role)}&isAdmin=${isAdmin ? 'true' : 'false'}&name=${encodeURIComponent(userPayload.atelieName || '')}&displayName=${encodeURIComponent(userPayload.displayName || '')}`;
     return res.redirect(redirectUrl);
   } catch (err: any) {
     console.error('[Google OAuth Callback Exception]:', err);

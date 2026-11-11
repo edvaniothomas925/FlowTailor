@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { localDb } from '../lib/neonStore';
 import { Atelie, Cliente, Medidas, Pedido } from '../types';
-import { Users, Search, PlusCircle, AlertTriangle, ChevronRight, User, Ruler, FileText, ChevronDown, ChevronUp, ArrowLeft, Calendar, BadgeAlert } from 'lucide-react';
+import { Users, Search, PlusCircle, AlertTriangle, ChevronRight, User, Ruler, FileText, ChevronDown, ChevronUp, ArrowLeft, Calendar, BadgeAlert, FileDown } from 'lucide-react';
 import { toast } from '../lib/toast';
 import { formatarMoeda, getAtelieCountry, PAISES_CONFIG } from '../lib/localization';
+import { exportarFichaClientePDF } from '../lib/pdfExporter';
 
 interface ClientesViewProps {
   atelie: Atelie;
@@ -189,12 +190,25 @@ export default function ClientesView({ atelie, onNavigateToCreateOrder }: Client
                   <p className="text-xs text-atelier-200 font-mono">Contacto: +{clienteSelecionado.telefone}</p>
                 </div>
               </div>
-              <div className="flex items-center gap-2.5">
+              <div className="flex items-center gap-2.5 flex-wrap">
                 {isMedidaDesatualizada(clienteSelecionado.id) && (
                   <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-amber-500/90 text-[10px] font-bold text-gray-950">
                     <AlertTriangle className="w-3.5 h-3.5" /> Ficha de Medidas Desactualizada (+90 dias)
                   </span>
                 )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    const medidasList = localDb.getMedidas(atelie.id, clienteSelecionado.id);
+                    const pedidosList = localDb.getPedidos(atelie.id).filter(p => p.clienteId === clienteSelecionado.id);
+                    exportarFichaClientePDF(atelie, clienteSelecionado, medidasList, pedidosList);
+                    toast.success('📄 Ficha e medidas da cliente exportadas em PDF com sucesso!');
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-white/20 hover:bg-white/30 text-white text-xs font-bold transition shadow-xs cursor-pointer border border-white/20 active:scale-95"
+                  title="Exportar dossier e medidas em PDF"
+                >
+                  <FileDown className="w-4 h-4 text-amber-300" /> Exportar Ficha (PDF)
+                </button>
               </div>
             </div>
 

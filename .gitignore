@@ -5,5 +5,9 @@ coverage/
 .DS_Store
 *.log
 .env*
+tests/
+.cache/
+tests-results/
+agent-skills/
 !.env.example
 

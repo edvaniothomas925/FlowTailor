@@ -10,7 +10,8 @@ import {
   Clock, 
   FileText, 
   Search, 
-  Printer, 
+  Download,
+  FileDown, 
   Calendar, 
   MessageSquare, 
   PieChart, 
@@ -24,6 +25,7 @@ import {
 } from 'lucide-react';
 import { toast } from '../lib/toast';
 import { formatarMoeda, getAtelieCountry, PAISES_CONFIG } from '../lib/localization';
+import { exportarRelatorioPDF } from '../lib/pdfExporter';
 
 interface RelatoriosViewProps {
   atelie: Atelie;
@@ -243,17 +245,26 @@ export default function RelatoriosView({ atelie }: RelatoriosViewProps) {
   const statusStats = stats.statusS;
   const taxaPagamento = stats.taxa;
 
-   // trigger browser print
-  const handlePrint = () => {
-    if (atelie.plano === 'basico') {
-      toast.error('A impressão de relatórios consolidados e exportação de dados para auditores é uma funcionalidade avançada do plano Pro Completo.');
-      return;
+  const [isExportingPDF, setIsExportingPDF] = useState(false);
+
+  // Exportar relatório completo em PDF estruturado e profissional
+  const handleExportPDF = () => {
+    setIsExportingPDF(true);
+    try {
+      const periodoLabelsMap: Record<PeriodoFiltro, string> = {
+        tudo: 'Histórico Completo',
+        este_mes: 'Este Mês',
+        ultimos_30: 'Últimos 30 Dias',
+        ultimos_90: 'Últimos 90 Dias'
+      };
+      exportarRelatorioPDF(atelie, stats, periodoLabelsMap[periodo]);
+      toast.success('📄 Relatório PDF organizado exportado com sucesso!');
+    } catch (err: any) {
+      console.error('Erro ao gerar PDF:', err);
+      toast.error('Erro ao gerar ficheiro PDF: ' + (err?.message || err));
+    } finally {
+      setIsExportingPDF(false);
     }
-    setPrintMode(true);
-    setTimeout(() => {
-      window.print();
-      setPrintMode(false);
-    }, 450);
   };
 
   // WhatsApp reminder generator for outstanding balances
@@ -267,41 +278,30 @@ export default function RelatoriosView({ atelie }: RelatoriosViewProps) {
   return (
     <div id="relatorios-page" className="space-y-6">
       
-      {/* Upper header action belt, hidden during full page prints */}
-      {!printMode && (
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 select-none">
-          <div>
-            <h2 className="text-2xl font-bold font-display tracking-tight text-gray-950 flex items-center gap-2">
-              <FileText className="w-6 h-6 text-atelier-600" /> Relatórios do Ateliê
-            </h2>
-            <p className="text-xs text-gray-500">
-              Análise financeira profunda do {atelie.nome}. Filtre por datas, audite pendências e exporte os seus dados de forma descomplicada.
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2 flex-wrap">
-            <button
-              onClick={handlePrint}
-              type="button"
-              className="px-4 py-2 bg-slate-900 text-white text-xs font-bold rounded-xl transition hover:bg-slate-800 flex items-center gap-1.5 cursor-pointer shadow-sm"
-              title="Gerar impressão limpa"
-            >
-              <Printer className="w-4 h-4" /> Imprimir Relatório
-            </button>
-          </div>
+      {/* Upper header action belt */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 select-none">
+        <div>
+          <h2 className="text-2xl font-bold font-display tracking-tight text-gray-950 flex items-center gap-2">
+            <FileText className="w-6 h-6 text-atelier-600" /> Relatórios do Ateliê
+          </h2>
+          <p className="text-xs text-gray-500">
+            Análise financeira profunda do {atelie.nome}. Filtre por datas, audite pendências e exporte os seus dados directamente em PDF.
+          </p>
         </div>
-      )}
 
-      {/* Report Header for printing only */}
-      {printMode && (
-        <div className="border-b-2 border-slate-900 pb-4 mb-4 text-center">
-          <h1 className="text-2xl font-bold uppercase tracking-wider">{atelie.nome} - Relatório de Ateliê</h1>
-          <p className="text-sm text-slate-600 mt-1">Gerado em {new Date().toLocaleDateString('pt-AO')} às {new Date().toLocaleTimeString('pt-AO')} | SaaS FlowTailor {PAISES_CONFIG[getAtelieCountry(atelie)].flag}</p>
-          <div className="text-[11px] text-slate-500 mt-2">
-            Licença: {atelie.plano === 'pro' ? 'PROFISSIONAL PRO' : 'BÁSICO'} • Responsável: {atelie.emailOwner}
-          </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={handleExportPDF}
+            disabled={isExportingPDF}
+            type="button"
+            className="px-4 py-2.5 bg-atelier-700 text-white text-xs font-bold rounded-xl transition hover:bg-atelier-800 flex items-center gap-2 cursor-pointer shadow-sm active:scale-[0.98] disabled:opacity-60"
+            title="Exportar documento oficial em PDF"
+          >
+            <FileDown className="w-4 h-4 text-amber-300" />
+            <span>{isExportingPDF ? 'A gerar PDF organizado...' : 'Exportar Relatório em PDF'}</span>
+          </button>
         </div>
-      )}
+      </div>
 
       {/* Filter Toolbar - hidden on printing */}
       {!printMode && (

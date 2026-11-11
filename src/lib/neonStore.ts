@@ -2040,23 +2040,26 @@ export class CustomAuthService {
     if (mode === 'demo_admin') {
       const uid = 'admin_flowtailor';
       const email = 'admin@flowtailor.ao';
-      try {
-        const authRes = await fetch('/api/auth/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email, password: 'admin123' }),
-        });
-        const authData = await authRes.json().catch(() => null);
-        if (authData?.accessToken && typeof localStorage !== 'undefined') {
-          localStorage.setItem('jwt_token', authData.accessToken);
-        }
-      } catch (authErr) {
-        console.warn('[Demo Auth Warning]:', authErr);
-      }
+
+      // Background token acquisition if server is reachable
+      fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password: 'admin123' }),
+      })
+        .then(r => r.json())
+        .then(data => {
+          if (data?.accessToken && typeof localStorage !== 'undefined') {
+            localStorage.setItem('jwt_token', data.accessToken);
+            localStorage.setItem('flowtailor_jwt_token', data.accessToken);
+          }
+        })
+        .catch(() => {});
+
       localStorage.setItem('ateliepro_current_uid', uid);
       localStorage.setItem('ateliepro_current_email', email);
       localStorage.setItem('ateliepro_admin_nome', 'Edvânio (Administrador)');
-      this.currentSession = {
+      const userObj: UserSession = {
         uid,
         email,
         name: 'Edvânio (Administrador)',
@@ -2065,25 +2068,31 @@ export class CustomAuthService {
         isAdmin: true,
         atelie: null,
       };
+      localStorage.setItem('flowtailor_current_user', JSON.stringify(userObj));
+      localStorage.setItem('flowtailor_session', JSON.stringify(userObj));
+      this.currentSession = userObj;
       localDb.initAdminRealtimeSync();
       this.notify();
       return this.currentSession;
     } else {
       const uid = 'user_rosa';
       const email = 'rosa@ateliepro.com';
-      try {
-        const authRes = await fetch('/api/auth/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email, password: '123456' }),
-        });
-        const authData = await authRes.json().catch(() => null);
-        if (authData?.accessToken && typeof localStorage !== 'undefined') {
-          localStorage.setItem('jwt_token', authData.accessToken);
-        }
-      } catch (authErr) {
-        console.warn('[Demo Auth Warning]:', authErr);
-      }
+
+      // Background token acquisition
+      fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password: '123456' }),
+      })
+        .then(r => r.json())
+        .then(data => {
+          if (data?.accessToken && typeof localStorage !== 'undefined') {
+            localStorage.setItem('jwt_token', data.accessToken);
+            localStorage.setItem('flowtailor_jwt_token', data.accessToken);
+          }
+        })
+        .catch(() => {});
+
       let atelie = localDb.getAtelie(uid) || localDb.getAtelies().find(a => a.id === 'user_rosa' || a.emailOwner === email);
       if (!atelie) {
         atelie = {
@@ -2098,11 +2107,11 @@ export class CustomAuthService {
           pais: 'AO',
           avatarIcon: 'scissors',
         };
-        await localDb.saveAtelie(atelie);
+        localDb.saveAtelie(atelie);
       }
       localStorage.setItem('ateliepro_current_uid', uid);
       localStorage.setItem('ateliepro_current_email', email);
-      this.currentSession = {
+      const userObj: UserSession = {
         uid,
         email,
         name: atelie.nome,
@@ -2111,6 +2120,9 @@ export class CustomAuthService {
         isAdmin: false,
         atelie,
       };
+      localStorage.setItem('flowtailor_current_user', JSON.stringify(userObj));
+      localStorage.setItem('flowtailor_session', JSON.stringify(userObj));
+      this.currentSession = userObj;
       localDb.initRealtimeSync(uid);
       this.notify();
       return this.currentSession;

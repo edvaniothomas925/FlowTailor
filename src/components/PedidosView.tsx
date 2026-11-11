@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { localDb } from '../lib/neonStore';
 import { Atelie, Cliente, Pedido, TipoPeca, PedidoStatus } from '../types';
-import { Search, PlusCircle, Filter, Calendar, DollarSign, Image as ImageIcon, CheckCircle, Clock, Eye, AlertCircle, Trash2, Lock, Link, Save, HelpCircle, Maximize2, ExternalLink } from 'lucide-react';
+import { Search, PlusCircle, Filter, Calendar, DollarSign, Image as ImageIcon, CheckCircle, Clock, Eye, AlertCircle, Trash2, Lock, Link, Save, HelpCircle, Maximize2, ExternalLink, FileDown } from 'lucide-react';
 import { toast } from '../lib/toast';
 import { formatarMoeda, getAtelieCountry, PAISES_CONFIG } from '../lib/localization';
+import { exportarReciboPedidoPDF } from '../lib/pdfExporter';
 
 interface PedidosViewProps {
   atelie: Atelie;
@@ -520,17 +521,31 @@ export default function PedidosView({ atelie, preselectedClientId, onClearPresel
                 </div>
 
                 {/* Footer and ref photo visual controls */}
-                <div className="px-5 py-3 bg-atelier-50/50 border-t border-atelier-100 flex items-center justify-between">
-                  <button
-                    onClick={() => {
-                      setVisualizandoFoto(pedido.fotoReferenciaUrl || 'https://images.unsplash.com/photo-1544816155-12df9643f363?auto=format&fit=crop&q=80&w=400');
-                      setPedidoFotoEdit(pedido);
-                      setTempFotoUrl(pedido.fotoReferenciaUrl || 'https://images.unsplash.com/photo-1544816155-12df9643f363?auto=format&fit=crop&q=80&w=400');
-                    }}
-                    className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700 hover:text-slate-900 cursor-pointer"
-                  >
-                    <ImageIcon className="w-4 h-4 text-atelier-500" /> Ver Modelo Foto
-                  </button>
+                <div className="px-5 py-3 bg-atelier-50/50 border-t border-atelier-100 flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => {
+                        setVisualizandoFoto(pedido.fotoReferenciaUrl || 'https://images.unsplash.com/photo-1544816155-12df9643f363?auto=format&fit=crop&q=80&w=400');
+                        setPedidoFotoEdit(pedido);
+                        setTempFotoUrl(pedido.fotoReferenciaUrl || 'https://images.unsplash.com/photo-1544816155-12df9643f363?auto=format&fit=crop&q=80&w=400');
+                      }}
+                      className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700 hover:text-slate-900 cursor-pointer"
+                    >
+                      <ImageIcon className="w-4 h-4 text-atelier-500" /> Ver Modelo Foto
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        exportarReciboPedidoPDF(atelie, pedido);
+                        toast.success('📄 Recibo da encomenda exportado em PDF com sucesso!');
+                      }}
+                      className="inline-flex items-center gap-1.5 text-xs font-bold text-atelier-700 hover:text-atelier-900 cursor-pointer bg-atelier-100/60 hover:bg-atelier-200/80 px-2.5 py-1 rounded-lg transition active:scale-95"
+                      title="Exportar Recibo e Comprovativo da Encomenda em PDF"
+                    >
+                      <FileDown className="w-3.5 h-3.5 text-atelier-600" /> Recibo PDF
+                    </button>
+                  </div>
 
                   <button
                     onClick={() => setPedidoParaExcluir(pedido)}
